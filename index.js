@@ -71,10 +71,11 @@ const sessions = {};
 function getSession(from) {
   if (!sessions[from]) {
     sessions[from] = {
-      state: "NEW", // NEW, MAIN_MENU, ASK_TOUR_DEST, ASK_HOTEL_DEST, ASK_FLIGHT_ROUTE, ASK_TRAVEL_QUESTION, AFTER_LINKS, ASK_ITINERARY_DETAILS
+      state: "NEW", // NEW, MAIN_MENU, ...
       lastDestination: null,
       lastService: null, // "tours" | "hotels" | "flights"
       itineraryDetails: null,
+      currentItineraryId: null, // used when editing
     };
   }
   return sessions[from];
@@ -214,27 +215,46 @@ app.post(
       try {
         // Update itinerary_requests with paid status
         const updateRes = await db.query(
-          `UPDATE itinerary_requests
-           SET payment_status = 'paid'
-           WHERE paystack_reference = $1
-           RETURNING id, whatsapp_number`,
-          [reference]
-        );
+  `UPDATE itinerary_requests
+   SET payment_status = 'paid',
+       editable_until = NOW() + interval '3 days'
+   WHERE paystack_reference = $1
+   RETURNING id, whatsapp_number, raw_details, last_destination`,
+  [reference]
+);
 
-        if (updateRes.rowCount > 0) {
-          const row = updateRes.rows[0];
-          const wa = row.whatsapp_number;
+console.log("Webhook DB update rowCount:", updateRes.rowCount);
 
-          // Notify user on WhatsApp
-          await sendWhatsApp(
-            wa,
-            "🎉 Payment received successfully! Thank you.\n\n" +
-              "I’ll now start working on your *custom itinerary* and share a draft with you here. " +
-              "You’ll be able to request edits for up to *3 days* after it’s sent. 🧳✨"
-          );
-        } else {
-          console.warn("No itinerary_request found for reference:", reference);
-        }
+if (updateRes.rowCount > 0) {
+  const row = updateRes.rows[0];
+  const wa = row.whatsapp_number;
+  const details = row.raw_details || "";
+  const dest = row.last_destination || "your trip";
+
+  // 1) Generate itinerary text
+  const itineraryText = generateItineraryText(dest, details);
+
+  // 2) Save it into DB
+  await db.query(
+    `UPDATE itinerary_requests
+     SET itinerary_text = $1
+     WHERE id = $2`,
+    [itineraryText, row.id]
+  );
+
+  // 3) Send it to the user
+  const msg =
+    "🎉 *Payment received successfully!* Thank you.\n\n" +
+    `Here is your *draft itinerary* for *${dest}*:\n\n` +
+    itineraryText +
+    "\n\nYou can reply with *EDIT ITINERARY* to request changes within the next *3 days*, " +
+    "or *ITINERARY* any time to view this plan again.";
+
+  await sendWhatsApp(wa, msg);
+} else {
+  console.warn("No itinerary_request found for reference:", reference);
+}
+
       } catch (err) {
         console.error("Error handling Paystack webhook:", err);
       }
@@ -260,6 +280,99 @@ app.post("/webhook", async (req, res) => {
       res.status(200).end(); // empty body → no extra "OK" message in WhatsApp
     }
   };
+
+    // === GLOBAL: VIEW ITINERARY ===
+  if (text === "itinerary" || text === "my itinerary") {
+    try {
+      const r = await db.query(
+        `SELECT id, itinerary_text, editable_until, payment_status
+         FROM itinerary_requests
+         WHERE whatsapp_number = $1
+           AND payment_status = 'paid'
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [from]
+      );
+
+      if (r.rowCount === 0 || !r.rows[0].itinerary_text) {
+        await sendWhatsApp(
+          from,
+          "I couldn’t find any paid itineraries for this number yet. You can get one by choosing *5* from the main menu."
+        );
+      } else {
+        const row = r.rows[0];
+        let extra = "";
+        if (row.editable_until) {
+          extra =
+            "\n\n🕒 *Edit window:* until " +
+            new Date(row.editable_until).toLocaleString("en-GB", {
+              timeZone: "Africa/Nairobi",
+            }) +
+            " (Africa/Nairobi time).";
+        }
+
+        await sendWhatsApp(
+          from,
+          "Here is your latest itinerary:\n\n" + row.itinerary_text + extra
+        );
+      }
+    } catch (err) {
+      console.error("Error fetching itinerary:", err);
+      await sendWhatsApp(
+        from,
+        "Sorry, I had trouble loading your itinerary. Please try again in a moment."
+      );
+    }
+    finish();
+    return;
+  }
+
+  // === GLOBAL: EDIT ITINERARY ===
+  if (text === "edit itinerary" || text === "edit trip") {
+    try {
+      const r = await db.query(
+        `SELECT id, itinerary_text, editable_until
+         FROM itinerary_requests
+         WHERE whatsapp_number = $1
+           AND payment_status = 'paid'
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [from]
+      );
+
+      if (r.rowCount === 0) {
+        await sendWhatsApp(
+          from,
+          "I couldn’t find a paid itinerary to edit. You can request one by choosing *5* from the main menu."
+        );
+      } else {
+        const row = r.rows[0];
+
+        if (row.editable_until && new Date(row.editable_until) < new Date()) {
+          await sendWhatsApp(
+            from,
+            "Your 3-day edit window for this itinerary has expired. To create a new version, please choose *5* from the main menu and request a fresh itinerary."
+          );
+        } else {
+          session.state = "EDIT_ITINERARY_DETAILS";
+          session.currentItineraryId = row.id;
+
+          await sendWhatsApp(
+            from,
+            "No problem! 😊\nPlease send your *updated trip details* (or describe the changes you’d like). I’ll regenerate your itinerary based on your new message."
+          );
+        }
+      }
+    } catch (err) {
+      console.error("Error preparing edit itinerary:", err);
+      await sendWhatsApp(
+        from,
+        "Sorry, I hit a problem while preparing your edit. Please try again shortly."
+      );
+    }
+    finish();
+    return;
+  }
 
   try {
     // ===== GLOBAL COMMANDS =====
@@ -482,6 +595,46 @@ app.post("/webhook", async (req, res) => {
         break;
       }
     }
+
+    // ===== ITINERARY GENERATION HELPERS =====
+
+// Try to extract "X days" from user details
+function extractDaysFromDetails(details) {
+  if (!details) return null;
+  const m = details.match(/(\d+)\s*(day|days)/i);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (!isNaN(n) && n > 0 && n <= 30) return n;
+  }
+  return null;
+}
+
+// Very simple template-based itinerary for now
+function generateItineraryText(destination, details) {
+  const days = extractDaysFromDetails(details) || 5; // default 5 days
+  let out = `🧳 *Draft Itinerary for ${destination}*\n`;
+  out += `_This is a first draft based on the info you shared. We can tweak it within 3 days._\n\n`;
+
+  for (let d = 1; d <= days; d++) {
+    out += `*Day ${d}:*\n`;
+    if (d === 1) {
+      out += `• Arrival in ${destination}, transfer to your accommodation.\n`;
+      out += "• Easy walk / rest, get familiar with the area.\n\n";
+    } else {
+      out += "• Morning: Flexible activity (game drive, city tour, beach time, or cultural visit).\n";
+      out += "• Afternoon: Another light activity or free time.\n";
+      out += "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
+    }
+  }
+
+  out +=
+    "📌 *Next steps:*\n" +
+    "• We can swap days around or add/remove activities.\n" +
+    "• I’ll soon plug in specific *tours, hotels & transfers* from Hugu Adventures’ partners.\n";
+
+  return out;
+}
+
 
     finish();
   } catch (err) {
