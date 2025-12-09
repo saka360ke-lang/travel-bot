@@ -194,6 +194,45 @@ function itineraryUpsellText(destination) {
   );
 }
 
+// ===== ITINERARY GENERATION HELPERS =====
+
+// Try to extract "X days" from user details like "6 days", "for 10 days", etc.
+function extractDaysFromDetails(details) {
+  if (!details) return null;
+  const m = details.match(/(\d+)\s*(day|days)/i);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (!isNaN(n) && n > 0 && n <= 30) return n;
+  }
+  return null;
+}
+
+// Very simple template-based itinerary for now
+function generateItineraryText(destination, details) {
+  const days = extractDaysFromDetails(details) || 5; // default 5 days
+  let out = `🧳 *Draft Itinerary for ${destination}*\n`;
+  out += `_This is a first draft based on the info you shared. We can tweak it within 3 days._\n\n`;
+
+  for (let d = 1; d <= days; d++) {
+    out += `*Day ${d}:*\n`;
+    if (d === 1) {
+      out += `• Arrival in ${destination}, transfer to your accommodation.\n`;
+      out += "• Easy walk / rest, get familiar with the area.\n\n";
+    } else {
+      out += "• Morning: Flexible activity (game drive, city tour, beach time, or cultural visit).\n";
+      out += "• Afternoon: Another light activity or free time.\n";
+      out += "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
+    }
+  }
+
+  out +=
+    "📌 *Next steps:*\n" +
+    "• We can swap days around or add/remove activities.\n" +
+    "• I’ll soon plug in specific *tours, hotels & transfers* from Hugu Adventures’ partners.\n";
+
+  return out;
+}
+
 // ===== Paystack Webhook – to confirm payment automatically =====
 app.post(
   "/paystack/webhook",
