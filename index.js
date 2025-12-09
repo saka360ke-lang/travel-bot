@@ -148,15 +148,14 @@ function buildTourLinks(destination) {
 
   const base =
     process.env.VIATOR_AFFILIATE_BASE ||
-    VIATOR_BASE_URL ||
     "https://www.viator.com/searchResults/all?text=";
 
   const suffix = process.env.VIATOR_AFFILIATE_SUFFIX || "";
 
-  // First link: basic search
+  // First link: normal search
   const link1 = `${base}${encoded}${suffix}`;
 
-  // Second link: maybe sorted differently
+  // Second link: same search, but sorted recommended (optional)
   const link2 = `${base}${encoded}${suffix}&sort=RECOMMENDED`;
 
   return [link1, link2];
