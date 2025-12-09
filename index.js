@@ -6,6 +6,7 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
 const twilio = require("twilio");
+const OpenAI = require("openai");
 const { Pool } = require("pg");
 
 const app = express();
@@ -143,11 +144,21 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
 
 // Viator / tours links
 function buildTourLinks(destination) {
-  const encoded = encodeURIComponent(destination);
+  const encoded = encodeURIComponent(destination.trim());
+
   const base =
-    VIATOR_BASE_URL ||
-    "https://your-viator-affiliate-search-url.com/search?q=";
-  return [`${base}${encoded}`, `${base}${encoded}&page=2`];
+    process.env.VIATOR_AFFILIATE_BASE ||
+    "https://www.viator.com/searchResults/all?text=";
+
+  const suffix = process.env.VIATOR_AFFILIATE_SUFFIX || "";
+
+  // First link: basic search
+  const link1 = `${base}${encoded}${suffix}`;
+
+  // Second link: same destination, maybe sorted differently or page 2 (optional)
+  const link2 = `${base}${encoded}${suffix}&sort=RECOMMENDED`;
+
+  return [link1, link2];
 }
 
 // Booking.com / hotels links
@@ -207,8 +218,8 @@ function extractDaysFromDetails(details) {
   return null;
 }
 
-// Very simple template-based itinerary for now
-function generateItineraryText(destination, details) {
+// Fallback template if AI fails
+function generateItineraryFallback(destination, details) {
   const days = extractDaysFromDetails(details) || 5; // default 5 days
   let out = `🧳 *Draft Itinerary for ${destination}*\n`;
   out += `_This is a first draft based on the info you shared. We can tweak it within 3 days._\n\n`;
@@ -219,8 +230,8 @@ function generateItineraryText(destination, details) {
       out += `• Arrival in ${destination}, transfer to your accommodation.\n`;
       out += "• Easy walk / rest, get familiar with the area.\n\n";
     } else {
-      out += "• Morning: Flexible activity (game drive, city tour, beach time, or cultural visit).\n";
-      out += "• Afternoon: Another light activity or free time.\n";
+      out += "• Morning: Flexible activity (city tour, safari, beach time, or cultural visit).\n";
+      out += "• Afternoon: Another activity or free time.\n";
       out += "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
     }
   }
@@ -232,6 +243,83 @@ function generateItineraryText(destination, details) {
 
   return out;
 }
+// Fetch Viator Tours //
+async function fetchViatorTours(destination) {
+  const base = process.env.VIATOR_API_BASE;
+  const apiKey = process.env.VIATOR_API_KEY;
+  if (!base || !apiKey) {
+    // Fallback to affiliate links only
+    return null;
+  }
+
+  try {
+    const res = await axios.get(`${base}/products/search`, {
+      headers: {
+        "Accept": "application/json",
+        "Api-Key": apiKey,
+      },
+      params: {
+        text: destination,
+        sort: "RECOMMENDED",
+        count: 3,
+      },
+    });
+
+    if (!res.data || !Array.isArray(res.data.data)) return null;
+
+    return res.data.data.map((item) => ({
+      title: item.title,
+      shortDescription: item.shortDescription,
+      productCode: item.productCode,
+      url: item.productUrl || null, // depending on API
+    }));
+  } catch (err) {
+    console.error("Error fetching Viator tours:", err.response?.data || err.message);
+    return null;
+  }
+}
+
+// AI-powered itinerary generation
+async function generateItineraryText(destination, details) {
+  const days = extractDaysFromDetails(details) || 5;
+
+  const prompt =
+    "You are a professional global travel planner creating realistic, bookable-style itineraries.\n\n" +
+    `Traveler request:\n"${details}"\n\n` +
+    `Destination(s): ${destination}\n` +
+    `Length: ${days} days\n\n` +
+    "Please return a concise WhatsApp-friendly itinerary with this format:\n" +
+    "- Start with a short title line like: 🧳 *6-Day Arusha & Ngorongoro Adventure*\n" +
+    "- Then for each day:\n" +
+    "  *Day X: Short title*\n" +
+    "  • Morning: ...\n" +
+    "  • Afternoon: ...\n" +
+    "  • Evening: ...\n" +
+    "- Keep it under about 300–400 words.\n" +
+    "- Do NOT include prices. Do NOT mention specific tour companies by name.\n";
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "system", content: "You create structured, day-by-day travel itineraries worldwide." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.7,
+    });
+
+    const text = completion.choices[0]?.message?.content?.trim();
+    if (!text) {
+      console.warn("AI returned empty itinerary, using fallback");
+      return generateItineraryFallback(destination, details);
+    }
+    return text;
+  } catch (err) {
+    console.error("Error calling AI for itinerary:", err);
+    return generateItineraryFallback(destination, details);
+  }
+}
+
 
 // ===== Paystack Webhook – to confirm payment automatically =====
 app.post(
@@ -487,16 +575,31 @@ app.post("/webhook", async (req, res) => {
         const dest = body;
         session.lastDestination = dest;
 
-        const links = buildTourLinks(dest);
-        const linksText =
-          `Great choice! 🎉 Here are *tour ideas* for *${dest}* (replace with your Viator affiliate links):\n\n` +
-          links.map((l) => `🔗 ${l}`).join("\n") +
-          "\n\n";
+        const tours = await fetchViatorTours(dest);
 
-        await sendWhatsApp(from, linksText + itineraryUpsellText(dest));
-        session.state = "AFTER_LINKS";
-        break;
-      }
+if (tours && tours.length > 0) {
+  let msg = `Great choice! 🎉 Here are some *top tours* for *${dest}*:\n\n`;
+  tours.forEach((t, idx) => {
+    // You can later convert productCode → affiliate URL if API URL is not already tracked
+    msg += `*${idx + 1}. ${t.title}*\n`;
+    if (t.shortDescription) msg += `${t.shortDescription}\n`;
+    if (t.url) msg += `🔗 ${t.url}\n`;
+    msg += "\n";
+  });
+  msg += "You can ask me for more options, or type *YES* to get a full custom itinerary. 🧳\n\n";
+  await sendWhatsApp(from, msg + itineraryUpsellText(dest));
+} else {
+  // Fallback: search links only
+  const links = buildTourLinks(dest);
+  const linksText =
+    `Great choice! 🎉 Here are *tour ideas* for *${dest}* on Viator:\n\n` +
+    links.map((l) => `🔗 ${l}`).join("\n") +
+    "\n\n";
+  await sendWhatsApp(from, linksText + itineraryUpsellText(dest));
+}
+
+session.state = "AFTER_LINKS";
+
 
       case "ASK_HOTEL_DEST": {
         const dest = body;
