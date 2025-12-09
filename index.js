@@ -421,101 +421,101 @@ app.post("/webhook", async (req, res) => {
     }
   };
 
-  // === GLOBAL: VIEW ITINERARY ===
-  if (text === "itinerary" || text === "my itinerary") {
-    try {
-      const r = await db.query(
-        `SELECT id, itinerary_text, editable_until, payment_status
-         FROM itinerary_requests
-         WHERE whatsapp_number = $1
-           AND payment_status = 'paid'
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [from]
-      );
-
-      if (r.rowCount === 0 || !r.rows[0].itinerary_text) {
-        await sendWhatsApp(
-          from,
-          "I couldn’t find any paid itineraries for this number yet. You can get one by choosing *5* from the main menu."
+  try {
+    // === GLOBAL: VIEW ITINERARY ===
+    if (text === "itinerary" || text === "my itinerary") {
+      try {
+        const r = await db.query(
+          `SELECT id, itinerary_text, editable_until, payment_status
+           FROM itinerary_requests
+           WHERE whatsapp_number = $1
+             AND payment_status = 'paid'
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [from]
         );
-      } else {
-        const row = r.rows[0];
-        let extra = "";
-        if (row.editable_until) {
-          extra =
-            "\n\n🕒 *Edit window:* until " +
-            new Date(row.editable_until).toLocaleString("en-GB", {
-              timeZone: "Africa/Nairobi",
-            }) +
-            " (Africa/Nairobi time).";
-        }
 
-        await sendWhatsApp(
-          from,
-          "Here is your latest itinerary:\n\n" + row.itinerary_text + extra
-        );
-      }
-    } catch (err) {
-      console.error("Error fetching itinerary:", err);
-      await sendWhatsApp(
-        from,
-        "Sorry, I had trouble loading your itinerary. Please try again in a moment."
-      );
-    }
-    finish();
-    return;
-  }
-
-  // === GLOBAL: EDIT ITINERARY ===
-  if (text === "edit itinerary" || text === "edit trip") {
-    try {
-      const r = await db.query(
-        `SELECT id, itinerary_text, editable_until
-         FROM itinerary_requests
-         WHERE whatsapp_number = $1
-           AND payment_status = 'paid'
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [from]
-      );
-
-      if (r.rowCount === 0) {
-        await sendWhatsApp(
-          from,
-          "I couldn’t find a paid itinerary to edit. You can request one by choosing *5* from the main menu."
-        );
-      } else {
-        const row = r.rows[0];
-
-        if (row.editable_until && new Date(row.editable_until) < new Date()) {
+        if (r.rowCount === 0 || !r.rows[0].itinerary_text) {
           await sendWhatsApp(
             from,
-            "Your 3-day edit window for this itinerary has expired. To create a new version, please choose *5* from the main menu and request a fresh itinerary."
+            "I couldn’t find any paid itineraries for this number yet. You can get one by choosing *5* from the main menu."
           );
         } else {
-          session.state = "EDIT_ITINERARY_DETAILS";
-          session.currentItineraryId = row.id;
+          const row = r.rows[0];
+          let extra = "";
+          if (row.editable_until) {
+            extra =
+              "\n\n🕒 *Edit window:* until " +
+              new Date(row.editable_until).toLocaleString("en-GB", {
+                timeZone: "Africa/Nairobi",
+              }) +
+              " (Africa/Nairobi time).";
+          }
 
           await sendWhatsApp(
             from,
-            "No problem! 😊\nPlease send your *updated trip details* (or describe the changes you’d like). I’ll regenerate your itinerary based on your new message."
+            "Here is your latest itinerary:\n\n" + row.itinerary_text + extra
           );
         }
+      } catch (err) {
+        console.error("Error fetching itinerary:", err);
+        await sendWhatsApp(
+          from,
+          "Sorry, I had trouble loading your itinerary. Please try again in a moment."
+        );
       }
-    } catch (err) {
-      console.error("Error preparing edit itinerary:", err);
-      await sendWhatsApp(
-        from,
-        "Sorry, I hit a problem while preparing your edit. Please try again shortly."
-      );
+      finish();
+      return;
     }
-    finish();
-    return;
-  }
 
-  try {
-    // ===== GLOBAL COMMANDS =====
+    // === GLOBAL: EDIT ITINERARY ===
+    if (text === "edit itinerary" || text === "edit trip") {
+      try {
+        const r = await db.query(
+          `SELECT id, itinerary_text, editable_until
+           FROM itinerary_requests
+           WHERE whatsapp_number = $1
+             AND payment_status = 'paid'
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [from]
+        );
+
+        if (r.rowCount === 0) {
+          await sendWhatsApp(
+            from,
+            "I couldn’t find a paid itinerary to edit. You can request one by choosing *5* from the main menu."
+          );
+        } else {
+          const row = r.rows[0];
+
+          if (row.editable_until && new Date(row.editable_until) < new Date()) {
+            await sendWhatsApp(
+              from,
+              "Your 3-day edit window for this itinerary has expired. To create a new version, please choose *5* from the main menu and request a fresh itinerary."
+            );
+          } else {
+            session.state = "EDIT_ITINERARY_DETAILS";
+            session.currentItineraryId = row.id;
+
+            await sendWhatsApp(
+              from,
+              "No problem! 😊\nPlease send your *updated trip details* (or describe the changes you’d like). I’ll regenerate your itinerary based on your new message."
+            );
+          }
+        }
+      } catch (err) {
+        console.error("Error preparing edit itinerary:", err);
+        await sendWhatsApp(
+          from,
+          "Sorry, I hit a problem while preparing your edit. Please try again shortly."
+        );
+      }
+      finish();
+      return;
+    }
+
+    // ===== GLOBAL COMMANDS (MAIN MENU ETC.) =====
     if (
       text === "menu" ||
       text === "hi" ||
@@ -588,29 +588,13 @@ app.post("/webhook", async (req, res) => {
         const dest = body;
         session.lastDestination = dest;
 
-        const tours = await fetchViatorTours(dest);
+        const links = buildTourLinks(dest);
+        const linksText =
+          `Great choice! 🎉 Here are *tour ideas* for *${dest}* on Viator:\n\n` +
+          links.map((l) => `🔗 ${l}`).join("\n") +
+          "\n\n";
 
-        if (tours && tours.length > 0) {
-          let msg = `Great choice! 🎉 Here are some *top tours* for *${dest}*:\n\n`;
-          tours.forEach((t, idx) => {
-            msg += `*${idx + 1}. ${t.title}*\n`;
-            if (t.shortDescription) msg += `${t.shortDescription}\n`;
-            if (t.url) msg += `🔗 ${t.url}\n`;
-            msg += "\n";
-          });
-          msg +=
-            "You can ask me for more options, or type *YES* to get a full custom itinerary. 🧳\n\n";
-          await sendWhatsApp(from, msg + itineraryUpsellText(dest));
-        } else {
-          // Fallback: search links only
-          const links = buildTourLinks(dest);
-          const linksText =
-            `Great choice! 🎉 Here are *tour ideas* for *${dest}* on Viator:\n\n` +
-            links.map((l) => `🔗 ${l}`).join("\n") +
-            "\n\n";
-          await sendWhatsApp(from, linksText + itineraryUpsellText(dest));
-        }
-
+        await sendWhatsApp(from, linksText + itineraryUpsellText(dest));
         session.state = "AFTER_LINKS";
         break;
       }
@@ -746,12 +730,63 @@ app.post("/webhook", async (req, res) => {
       }
 
       case "EDIT_ITINERARY_DETAILS": {
-        // Here you could regenerate an itinerary using new details.
-        // For now just acknowledge and keep as a placeholder.
-        await sendWhatsApp(
-          from,
-          "Thanks! I’ve received your updated details. Soon I’ll regenerate your itinerary automatically based on this new info. 😊"
-        );
+        const newDetails = body;
+        session.itineraryDetails = newDetails;
+
+        if (!session.currentItineraryId) {
+          await sendWhatsApp(
+            from,
+            "I lost track of which itinerary to edit 😅. Please type *ITINERARY* to view your latest plan, or choose *5* from the menu to start a new one."
+          );
+          session.state = "MAIN_MENU";
+          break;
+        }
+
+        try {
+          const r = await db.query(
+            `SELECT id, last_destination
+             FROM itinerary_requests
+             WHERE id = $1
+               AND whatsapp_number = $2
+               AND payment_status = 'paid'`,
+            [session.currentItineraryId, from]
+          );
+
+          if (r.rowCount === 0) {
+            await sendWhatsApp(
+              from,
+              "I couldn’t find that itinerary anymore. Please choose *5* from the main menu to start a new one."
+            );
+            session.state = "MAIN_MENU";
+            break;
+          }
+
+          const row = r.rows[0];
+          const dest = row.last_destination || "your trip";
+          const newText = await generateItineraryText(dest, newDetails);
+
+          await db.query(
+            `UPDATE itinerary_requests
+             SET raw_details = $1,
+                 itinerary_text = $2
+             WHERE id = $3`,
+            [newDetails, newText, row.id]
+          );
+
+          await sendWhatsApp(
+            from,
+            "Here is your *updated itinerary*:\n\n" +
+              newText +
+              "\n\nYou can still request more edits within your 3-day window by sending *EDIT ITINERARY* again."
+          );
+        } catch (err) {
+          console.error("Error updating itinerary:", err);
+          await sendWhatsApp(
+            from,
+            "Sorry, something went wrong while updating your itinerary. Please try again."
+          );
+        }
+
         session.state = "MAIN_MENU";
         break;
       }
