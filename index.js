@@ -255,6 +255,58 @@ app.post("/paystack/webhook", express.json({ type: "*/*" }), async (req, res) =>
   res.status(200).send("OK");
 });
 
+// Paystack webhook – called by Paystack when payment status changes
+app.post("/paystack/webhook", async (req, res) => {
+  const event = req.body;
+
+  console.log("Paystack webhook event:", JSON.stringify(event, null, 2));
+
+  // We only care about successful charges
+  if (event && event.event === "charge.success" && event.data) {
+    const reference = event.data.reference;
+    const status = event.data.status; // should be "success"
+
+    if (status === "success") {
+      try {
+        const updateRes = await db.query(
+          `UPDATE itinerary_requests
+           SET payment_status = 'paid',
+               editable_until = NOW() + interval '3 days'
+           WHERE paystack_reference = $1
+           RETURNING id, whatsapp_number, raw_details, last_destination`,
+          [reference]
+        );
+
+        if (updateRes.rowCount > 0) {
+          const row = updateRes.rows[0];
+          const wa = row.whatsapp_number;
+          const details = row.raw_details || "";
+          const dest = row.last_destination || "your trip";
+
+          // Simple confirmation + explain 3-day edit window
+          const msg =
+            "🎉 *Payment received successfully!* Thank you.\n\n" +
+            `I’m now working on your *custom itinerary* for *${dest}*.\n` +
+            "You’ll be able to request edits for up to *3 days* from now.\n\n" +
+            "Here are the trip details you shared:\n" +
+            "---------------------------------\n" +
+            details +
+            "\n---------------------------------\n\n" +
+            "Soon I’ll send you a structured day-by-day plan here in WhatsApp. 🧳✨";
+
+          await sendWhatsApp(wa, msg);
+        } else {
+          console.warn("No itinerary_request found for Paystack reference:", reference);
+        }
+      } catch (err) {
+        console.error("Error handling Paystack webhook:", err);
+      }
+    }
+  }
+
+  // Always reply 200 so Paystack is happy
+  res.status(200).send("OK");
+});
 
   try {
     // ===== GLOBAL COMMANDS =====
