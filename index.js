@@ -52,8 +52,11 @@ const db = new Pool({
 });
 
 const paystackBase = PAYSTACK_BASE_URL || "https://api.paystack.co";
-const itineraryPriceCents = parseInt(ITINERARY_PRICE_CENTS || "500", 10); // default 500
-const itineraryCurrency = ITINERARY_CURRENCY || "USD";
+const itineraryPriceKES = parseInt(process.env.ITINERARY_AMOUNT_KES || "600", 10); // e.g. 600 KES
+const itineraryCurrency = ITINERARY_CURRENCY || "KES";
+
+// Convert to smallest unit (KES → cents)
+const itineraryAmountSmallest = itineraryPriceKES * 100;
 
 // ===== SIMPLE IN-MEMORY SESSION STORE =====
 const sessions = {};
@@ -96,7 +99,7 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
   const reference = `ITIN_${itineraryRequestId}_${Date.now()}`;
 
   const payload = {
-    amount: itineraryPriceCents * 100, // we'll review this next if needed
+    amount: itineraryAmountSmallest * 100, // we'll review this next if needed
     currency: itineraryCurrency,
     email: customerEmail,
     reference,
@@ -424,7 +427,7 @@ app.post("/paystack/webhook", express.json({ type: "*/*" }), async (req, res) =>
         session.lastService,
         session.lastDestination,
         body,
-        itineraryPriceCents,
+        itineraryAmountSmallest,
         itineraryCurrency,
       ]
     );
