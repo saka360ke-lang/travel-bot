@@ -6,13 +6,7 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
 const twilio = require("twilio");
-const OpenAI = require("openai");
 const { Pool } = require("pg");
-
-// ===== OPENAI CLIENT =====
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
 
 const app = express();
 
@@ -67,7 +61,7 @@ const paystackBase = PAYSTACK_BASE_URL || "https://api.paystack.co";
 const itineraryPriceKES = parseInt(process.env.ITINERARY_AMOUNT_KES || "600", 10); // e.g. 600 KES
 const itineraryCurrency = ITINERARY_CURRENCY || "KES";
 
-// Convert to smallest unit (KES → cents/kobo): Paystack expects this directly
+// Convert to smallest unit (KES → kobo/cents): Paystack expects this directly
 const itineraryAmountSmallest = itineraryPriceKES * 100;
 
 // ===== SIMPLE IN-MEMORY SESSION STORE =====
@@ -112,7 +106,7 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
   const reference = `ITIN_${itineraryRequestId}_${Date.now()}`;
 
   const payload = {
-    amount: itineraryAmountSmallest, // <-- CORRECT: already in smallest unit
+    amount: itineraryAmountSmallest, // already in smallest unit
     currency: itineraryCurrency,
     email: customerEmail,
     reference,
@@ -225,8 +219,8 @@ function extractDaysFromDetails(details) {
   return null;
 }
 
-// Fallback template if AI fails
-function generateItineraryFallback(destination, details) {
+// Simple generator (no AI) – safe and reliable
+async function generateItineraryText(destination, details) {
   const days = extractDaysFromDetails(details) || 5; // default 5 days
   let out = `🧳 *Draft Itinerary for ${destination}*\n`;
   out += `_This is a first draft based on the info you shared. We can tweak it within 3 days._\n\n`;
@@ -251,90 +245,6 @@ function generateItineraryFallback(destination, details) {
     "• I’ll soon plug in specific *tours, hotels & transfers* from Hugu Adventures’ partners.\n";
 
   return out;
-}
-
-// Fetch Viator Tours (optional, for future use)
-async function fetchViatorTours(destination) {
-  const base = process.env.VIATOR_API_BASE;
-  const apiKey = process.env.VIATOR_API_KEY;
-  if (!base || !apiKey) {
-    // Fallback to affiliate links only
-    return null;
-  }
-
-  try {
-    const res = await axios.get(`${base}/products/search`, {
-      headers: {
-        Accept: "application/json",
-        "Api-Key": apiKey,
-      },
-      params: {
-        text: destination,
-        sort: "RECOMMENDED",
-        count: 3,
-      },
-    });
-
-    if (!res.data || !Array.isArray(res.data.data)) return null;
-
-    return res.data.data.map((item) => ({
-      title: item.title,
-      shortDescription: item.shortDescription,
-      productCode: item.productCode,
-      url: item.productUrl || null, // depending on API
-    }));
-  } catch (err) {
-    console.error(
-      "Error fetching Viator tours:",
-      err.response?.data || err.message
-    );
-    return null;
-  }
-}
-
-// AI-powered itinerary generation
-async function generateItineraryText(destination, details) {
-  const days = extractDaysFromDetails(details) || 5;
-
-  const prompt =
-    "You are a professional global travel planner creating realistic, bookable-style itineraries.\n\n" +
-    `Traveler request:\n"${details}"\n\n` +
-    `Destination(s): ${destination}\n` +
-    `Length: ${days} days\n\n` +
-    "Please return a concise WhatsApp-friendly itinerary with this format:\n" +
-    "- Start with a short title line like: 🧳 *6-Day Arusha & Ngorongoro Adventure*\n" +
-    "- Then for each day:\n" +
-    "  *Day X: Short title*\n" +
-    "  • Morning: ...\n" +
-    "  • Afternoon: ...\n" +
-    "  • Evening: ...\n" +
-    "- Keep it under about 300–400 words.\n" +
-    "- Do NOT include prices. Do NOT mention specific tour companies by name.\n";
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            "You create structured, day-by-day travel itineraries worldwide.",
-        },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.7,
-    });
-
-    const text = completion.choices[0]?.message?.content?.trim();
-    if (!text) {
-      console.warn("AI returned empty itinerary, using fallback");
-      return generateItineraryFallback(destination, details);
-    }
-    return text;
-  } catch (err) {
-    console.error("Error calling AI for itinerary:", err);
-    return generateItineraryFallback(destination, details);
-  }
 }
 
 // ===== PAYSTACK WEBHOOK – confirm payment automatically =====
