@@ -9,6 +9,10 @@ const twilio = require("twilio");
 const OpenAI = require("openai");
 const { Pool } = require("pg");
 
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
@@ -66,7 +70,7 @@ const itineraryAmountSmallest = itineraryPriceKES * 100;
 
 // ===== SIMPLE IN-MEMORY SESSION STORE =====
 const sessions = {};
-// sessions[from] = { state, lastDestination, lastService, itineraryDetails }
+// sessions[from] = { state, lastDestination, lastService, itineraryDetails, currentItineraryId }
 
 // Helper: get or create session
 function getSession(from) {
@@ -148,6 +152,7 @@ function buildTourLinks(destination) {
 
   const base =
     process.env.VIATOR_AFFILIATE_BASE ||
+    VIATOR_BASE_URL ||
     "https://www.viator.com/searchResults/all?text=";
 
   const suffix = process.env.VIATOR_AFFILIATE_SUFFIX || "";
@@ -230,9 +235,12 @@ function generateItineraryFallback(destination, details) {
       out += `• Arrival in ${destination}, transfer to your accommodation.\n`;
       out += "• Easy walk / rest, get familiar with the area.\n\n";
     } else {
-      out += "• Morning: Flexible activity (city tour, safari, beach time, or cultural visit).\n";
-      out += "• Afternoon: Another activity or free time.\n";
-      out += "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
+      out +=
+        "• Morning: Flexible activity (city tour, safari, beach time, or cultural visit).\n";
+      out +=
+        "• Afternoon: Another activity or free time.\n";
+      out +=
+        "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
     }
   }
 
@@ -243,7 +251,8 @@ function generateItineraryFallback(destination, details) {
 
   return out;
 }
-// Fetch Viator Tours //
+
+// Fetch Viator Tours
 async function fetchViatorTours(destination) {
   const base = process.env.VIATOR_API_BASE;
   const apiKey = process.env.VIATOR_API_KEY;
@@ -255,7 +264,7 @@ async function fetchViatorTours(destination) {
   try {
     const res = await axios.get(`${base}/products/search`, {
       headers: {
-        "Accept": "application/json",
+        Accept: "application/json",
         "Api-Key": apiKey,
       },
       params: {
@@ -274,7 +283,10 @@ async function fetchViatorTours(destination) {
       url: item.productUrl || null, // depending on API
     }));
   } catch (err) {
-    console.error("Error fetching Viator tours:", err.response?.data || err.message);
+    console.error(
+      "Error fetching Viator tours:",
+      err.response?.data || err.message
+    );
     return null;
   }
 }
@@ -302,7 +314,10 @@ async function generateItineraryText(destination, details) {
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
-        { role: "system", content: "You create structured, day-by-day travel itineraries worldwide." },
+        {
+          role: "system",
+          content: "You create structured, day-by-day travel itineraries worldwide.",
+        },
         { role: "user", content: prompt },
       ],
       temperature: 0.7,
@@ -319,7 +334,6 @@ async function generateItineraryText(destination, details) {
     return generateItineraryFallback(destination, details);
   }
 }
-
 
 // ===== Paystack Webhook – to confirm payment automatically =====
 app.post(
@@ -342,46 +356,45 @@ app.post(
       try {
         // Update itinerary_requests with paid status
         const updateRes = await db.query(
-  `UPDATE itinerary_requests
-   SET payment_status = 'paid',
-       editable_until = NOW() + interval '3 days'
-   WHERE paystack_reference = $1
-   RETURNING id, whatsapp_number, raw_details, last_destination`,
-  [reference]
-);
+          `UPDATE itinerary_requests
+           SET payment_status = 'paid',
+               editable_until = NOW() + interval '3 days'
+           WHERE paystack_reference = $1
+           RETURNING id, whatsapp_number, raw_details, last_destination`,
+          [reference]
+        );
 
-console.log("Webhook DB update rowCount:", updateRes.rowCount);
+        console.log("Webhook DB update rowCount:", updateRes.rowCount);
 
-if (updateRes.rowCount > 0) {
-  const row = updateRes.rows[0];
-  const wa = row.whatsapp_number;
-  const details = row.raw_details || "";
-  const dest = row.last_destination || "your trip";
+        if (updateRes.rowCount > 0) {
+          const row = updateRes.rows[0];
+          const wa = row.whatsapp_number;
+          const details = row.raw_details || "";
+          const dest = row.last_destination || "your trip";
 
-  // 1) Generate itinerary text
-  const itineraryText = generateItineraryText(dest, details);
+          // 1) Generate itinerary text
+          const itineraryText = await generateItineraryText(dest, details);
 
-  // 2) Save it into DB
-  await db.query(
-    `UPDATE itinerary_requests
-     SET itinerary_text = $1
-     WHERE id = $2`,
-    [itineraryText, row.id]
-  );
+          // 2) Save it into DB
+          await db.query(
+            `UPDATE itinerary_requests
+             SET itinerary_text = $1
+             WHERE id = $2`,
+            [itineraryText, row.id]
+          );
 
-  // 3) Send it to the user
-  const msg =
-    "🎉 *Payment received successfully!* Thank you.\n\n" +
-    `Here is your *draft itinerary* for *${dest}*:\n\n` +
-    itineraryText +
-    "\n\nYou can reply with *EDIT ITINERARY* to request changes within the next *3 days*, " +
-    "or *ITINERARY* any time to view this plan again.";
+          // 3) Send it to the user
+          const msg =
+            "🎉 *Payment received successfully!* Thank you.\n\n" +
+            `Here is your *draft itinerary* for *${dest}*:\n\n` +
+            itineraryText +
+            "\n\nYou can reply with *EDIT ITINERARY* to request changes within the next *3 days*, " +
+            "or *ITINERARY* any time to view this plan again.";
 
-  await sendWhatsApp(wa, msg);
-} else {
-  console.warn("No itinerary_request found for reference:", reference);
-}
-
+          await sendWhatsApp(wa, msg);
+        } else {
+          console.warn("No itinerary_request found for reference:", reference);
+        }
       } catch (err) {
         console.error("Error handling Paystack webhook:", err);
       }
@@ -408,7 +421,7 @@ app.post("/webhook", async (req, res) => {
     }
   };
 
-    // === GLOBAL: VIEW ITINERARY ===
+  // === GLOBAL: VIEW ITINERARY ===
   if (text === "itinerary" || text === "my itinerary") {
     try {
       const r = await db.query(
@@ -577,29 +590,30 @@ app.post("/webhook", async (req, res) => {
 
         const tours = await fetchViatorTours(dest);
 
-if (tours && tours.length > 0) {
-  let msg = `Great choice! 🎉 Here are some *top tours* for *${dest}*:\n\n`;
-  tours.forEach((t, idx) => {
-    // You can later convert productCode → affiliate URL if API URL is not already tracked
-    msg += `*${idx + 1}. ${t.title}*\n`;
-    if (t.shortDescription) msg += `${t.shortDescription}\n`;
-    if (t.url) msg += `🔗 ${t.url}\n`;
-    msg += "\n";
-  });
-  msg += "You can ask me for more options, or type *YES* to get a full custom itinerary. 🧳\n\n";
-  await sendWhatsApp(from, msg + itineraryUpsellText(dest));
-} else {
-  // Fallback: search links only
-  const links = buildTourLinks(dest);
-  const linksText =
-    `Great choice! 🎉 Here are *tour ideas* for *${dest}* on Viator:\n\n` +
-    links.map((l) => `🔗 ${l}`).join("\n") +
-    "\n\n";
-  await sendWhatsApp(from, linksText + itineraryUpsellText(dest));
-}
+        if (tours && tours.length > 0) {
+          let msg = `Great choice! 🎉 Here are some *top tours* for *${dest}*:\n\n`;
+          tours.forEach((t, idx) => {
+            msg += `*${idx + 1}. ${t.title}*\n`;
+            if (t.shortDescription) msg += `${t.shortDescription}\n`;
+            if (t.url) msg += `🔗 ${t.url}\n`;
+            msg += "\n";
+          });
+          msg +=
+            "You can ask me for more options, or type *YES* to get a full custom itinerary. 🧳\n\n";
+          await sendWhatsApp(from, msg + itineraryUpsellText(dest));
+        } else {
+          // Fallback: search links only
+          const links = buildTourLinks(dest);
+          const linksText =
+            `Great choice! 🎉 Here are *tour ideas* for *${dest}* on Viator:\n\n` +
+            links.map((l) => `🔗 ${l}`).join("\n") +
+            "\n\n";
+          await sendWhatsApp(from, linksText + itineraryUpsellText(dest));
+        }
 
-session.state = "AFTER_LINKS";
-
+        session.state = "AFTER_LINKS";
+        break;
+      }
 
       case "ASK_HOTEL_DEST": {
         const dest = body;
@@ -731,52 +745,23 @@ session.state = "AFTER_LINKS";
         break;
       }
 
+      case "EDIT_ITINERARY_DETAILS": {
+        // Here you could regenerate an itinerary using new details.
+        // For now just acknowledge and keep as a placeholder.
+        await sendWhatsApp(
+          from,
+          "Thanks! I’ve received your updated details. Soon I’ll regenerate your itinerary automatically based on this new info. 😊"
+        );
+        session.state = "MAIN_MENU";
+        break;
+      }
+
       default: {
         session.state = "MAIN_MENU";
         await sendWhatsApp(from, mainMenuText());
         break;
       }
     }
-
-    // ===== ITINERARY GENERATION HELPERS =====
-
-// Try to extract "X days" from user details
-function extractDaysFromDetails(details) {
-  if (!details) return null;
-  const m = details.match(/(\d+)\s*(day|days)/i);
-  if (m) {
-    const n = parseInt(m[1], 10);
-    if (!isNaN(n) && n > 0 && n <= 30) return n;
-  }
-  return null;
-}
-
-// Very simple template-based itinerary for now
-function generateItineraryText(destination, details) {
-  const days = extractDaysFromDetails(details) || 5; // default 5 days
-  let out = `🧳 *Draft Itinerary for ${destination}*\n`;
-  out += `_This is a first draft based on the info you shared. We can tweak it within 3 days._\n\n`;
-
-  for (let d = 1; d <= days; d++) {
-    out += `*Day ${d}:*\n`;
-    if (d === 1) {
-      out += `• Arrival in ${destination}, transfer to your accommodation.\n`;
-      out += "• Easy walk / rest, get familiar with the area.\n\n";
-    } else {
-      out += "• Morning: Flexible activity (game drive, city tour, beach time, or cultural visit).\n";
-      out += "• Afternoon: Another light activity or free time.\n";
-      out += "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
-    }
-  }
-
-  out +=
-    "📌 *Next steps:*\n" +
-    "• We can swap days around or add/remove activities.\n" +
-    "• I’ll soon plug in specific *tours, hotels & transfers* from Hugu Adventures’ partners.\n";
-
-  return out;
-}
-
 
     finish();
   } catch (err) {
