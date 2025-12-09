@@ -9,11 +9,14 @@ const twilio = require("twilio");
 const OpenAI = require("openai");
 const { Pool } = require("pg");
 
+// ===== OPENAI CLIENT =====
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 const app = express();
+
+// Twilio sends x-www-form-urlencoded by default
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
@@ -36,7 +39,6 @@ const {
   PAYSTACK_SECRET_KEY,
   PAYSTACK_PUBLIC_KEY,
   PAYSTACK_BASE_URL,
-  ITINERARY_PRICE_CENTS,
   ITINERARY_CURRENCY,
 } = process.env;
 
@@ -58,14 +60,14 @@ const db = new Pool({
   connectionString: DATABASE_URL,
 });
 
+// ===== PAYSTACK CONFIG (KES) =====
 const paystackBase = PAYSTACK_BASE_URL || "https://api.paystack.co";
-const itineraryPriceKES = parseInt(
-  process.env.ITINERARY_AMOUNT_KES || "600",
-  10
-); // e.g. 600 KES
+
+// Price in KES
+const itineraryPriceKES = parseInt(process.env.ITINERARY_AMOUNT_KES || "600", 10); // e.g. 600 KES
 const itineraryCurrency = ITINERARY_CURRENCY || "KES";
 
-// Convert to smallest unit (KES → cents)
+// Convert to smallest unit (KES → cents/kobo): Paystack expects this directly
 const itineraryAmountSmallest = itineraryPriceKES * 100;
 
 // ===== SIMPLE IN-MEMORY SESSION STORE =====
@@ -110,7 +112,7 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
   const reference = `ITIN_${itineraryRequestId}_${Date.now()}`;
 
   const payload = {
-    amount: itineraryAmountSmallest * 100, // we'll review this next if needed
+    amount: itineraryAmountSmallest, // <-- CORRECT: already in smallest unit
     currency: itineraryCurrency,
     email: customerEmail,
     reference,
@@ -144,7 +146,7 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
   };
 }
 
-// ===== AFFILIATE LINK HELPERS (placeholder-friendly) =====
+// ===== AFFILIATE LINK HELPERS =====
 
 // Viator / tours links
 function buildTourLinks(destination) {
@@ -160,7 +162,7 @@ function buildTourLinks(destination) {
   // First link: basic search
   const link1 = `${base}${encoded}${suffix}`;
 
-  // Second link: same destination, maybe sorted differently or page 2 (optional)
+  // Second link: maybe sorted differently
   const link2 = `${base}${encoded}${suffix}&sort=RECOMMENDED`;
 
   return [link1, link2];
@@ -168,7 +170,7 @@ function buildTourLinks(destination) {
 
 // Booking.com / hotels links
 function buildHotelLinks(destination) {
-  const encoded = encodeURIComponent(destination);
+  const encoded = encodeURIComponent(destination.trim());
   const base =
     BOOKING_BASE_URL ||
     "https://your-booking-affiliate-search-url.com/search?q=";
@@ -177,7 +179,7 @@ function buildHotelLinks(destination) {
 
 // Flights links (e.g. Skyscanner/Kiwi)
 function buildFlightLinks(routeText) {
-  const encoded = encodeURIComponent(routeText);
+  const encoded = encodeURIComponent(routeText.trim());
   const base =
     FLIGHTS_BASE_URL ||
     "https://your-flights-affiliate-search-url.com/search?route=";
@@ -237,8 +239,7 @@ function generateItineraryFallback(destination, details) {
     } else {
       out +=
         "• Morning: Flexible activity (city tour, safari, beach time, or cultural visit).\n";
-      out +=
-        "• Afternoon: Another activity or free time.\n";
+      out += "• Afternoon: Another activity or free time.\n";
       out +=
         "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
     }
@@ -252,7 +253,7 @@ function generateItineraryFallback(destination, details) {
   return out;
 }
 
-// Fetch Viator Tours
+// Fetch Viator Tours (optional, for future use)
 async function fetchViatorTours(destination) {
   const base = process.env.VIATOR_API_BASE;
   const apiKey = process.env.VIATOR_API_KEY;
@@ -316,7 +317,8 @@ async function generateItineraryText(destination, details) {
       messages: [
         {
           role: "system",
-          content: "You create structured, day-by-day travel itineraries worldwide.",
+          content:
+            "You create structured, day-by-day travel itineraries worldwide.",
         },
         { role: "user", content: prompt },
       ],
@@ -335,24 +337,18 @@ async function generateItineraryText(destination, details) {
   }
 }
 
-// ===== Paystack Webhook – to confirm payment automatically =====
-app.post(
-  "/paystack/webhook",
-  express.json({ type: "*/*" }),
-  async (req, res) => {
-    const signature = req.headers["x-paystack-signature"];
+// ===== PAYSTACK WEBHOOK – confirm payment automatically =====
+app.post("/paystack/webhook", async (req, res) => {
+  // bodyParser.json() already parsed JSON for us
+  const event = req.body;
 
-    // Optional: verify signature with PAYSTACK_SECRET_KEY (recommended in production)
-    // For now, we'll just trust Paystack IP + HTTPS (but you should add verification later).
+  console.log("Paystack webhook event:", JSON.stringify(event, null, 2));
 
-    const event = req.body;
+  if (event && event.event === "charge.success" && event.data) {
+    const reference = event.data.reference;
+    const status = event.data.status; // should be "success"
 
-    console.log("Paystack webhook event:", JSON.stringify(event, null, 2));
-
-    if (event.event === "charge.success") {
-      const reference = event.data.reference;
-      const status = event.data.status; // should be "success"
-
+    if (status === "success") {
       try {
         // Update itinerary_requests with paid status
         const updateRes = await db.query(
@@ -399,10 +395,10 @@ app.post(
         console.error("Error handling Paystack webhook:", err);
       }
     }
-
-    res.status(200).send("OK");
   }
-);
+
+  res.status(200).send("OK");
+});
 
 // ===== WhatsApp WEBHOOK HANDLER =====
 app.post("/webhook", async (req, res) => {
