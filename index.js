@@ -85,13 +85,18 @@ async function sendWhatsApp(to, body) {
 //Payment Helper//
 // Create Paystack payment link for itinerary
 async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
-  // You can use whatsappNumber as customer identifier/email placeholder
-  const customerEmail = `wa_${whatsappNumber.replace("whatsapp:", "")}@huguadventures.fake`; // fake email just for Paystack
+  // Clean up phone to digits only
+  const phoneDigits = whatsappNumber
+    .replace("whatsapp:", "")
+    .replace(/[^\d]/g, "");
+
+  // Use a valid-looking domain
+  const customerEmail = `wa${phoneDigits || "guest"}@huguadventures.com`;
 
   const reference = `ITIN_${itineraryRequestId}_${Date.now()}`;
 
   const payload = {
-    amount: itineraryPriceCents * 100, // convert cents to "kobo" if USD->kobo; adjust per your setup
+    amount: itineraryPriceCents * 100, // we'll review this next if needed
     currency: itineraryCurrency,
     email: customerEmail,
     reference,
@@ -100,7 +105,7 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
       itinerary_request_id: itineraryRequestId,
       purpose: "custom_itinerary",
     },
-    callback_url: "https://your-domain.com/payment/thanks", // Later you can create a pretty page; not required for webhook to work
+    callback_url: "https://your-domain.com/payment/thanks",
   };
 
   const res = await axios.post(`${paystackBase}/transaction/initialize`, payload, {
