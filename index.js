@@ -8,6 +8,8 @@ const axios = require("axios");
 const twilio = require("twilio");
 const OpenAI = require("openai");
 const { Pool } = require("pg");
+const PDFDocument = require("pdfkit");
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 
 const app = express();
 
@@ -59,11 +61,27 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+const s3 = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: process.env.AWS_ACCESS_KEY_ID
+    ? {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      }
+    : undefined,
+});
+
+const S3_BUCKET = process.env.AWS_S3_BUCKET;
+const S3_BASE_URL = process.env.AWS_S3_BASE_URL;
+
 // ===== PAYSTACK CONFIG (KES) =====
 const paystackBase = PAYSTACK_BASE_URL || "https://api.paystack.co";
 
 // Price in KES
-const itineraryPriceKES = parseInt(process.env.ITINERARY_AMOUNT_KES || "600", 10); // e.g. 600 KES
+const itineraryPriceKES = parseInt(
+  process.env.ITINERARY_AMOUNT_KES || "600",
+  10
+); // e.g. 600 KES
 const itineraryCurrency = ITINERARY_CURRENCY || "KES";
 
 // Convert to smallest unit (KES → kobo/cents): Paystack expects this directly
@@ -94,6 +112,16 @@ async function sendWhatsApp(to, body) {
     from: TWILIO_NUMBER,
     to,
     body,
+  });
+}
+
+async function sendWhatsAppMedia(to, body, mediaUrl) {
+  console.log("Sending media message:", body, "mediaUrl:", mediaUrl);
+  return client.messages.create({
+    from: TWILIO_NUMBER,
+    to,
+    body,
+    mediaUrl: [mediaUrl],
   });
 }
 
@@ -235,9 +263,12 @@ function generateItineraryFallback(destination, details) {
       out += `• Arrival in ${destination}, transfer to your accommodation.\n`;
       out += "• Easy walk / rest, get familiar with the area.\n\n";
     } else {
-      out += "• Morning: Flexible activity (city tour, safari, beach time, or cultural visit).\n";
-      out += "• Afternoon: Another activity or free time.\n";
-      out += "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
+      out +=
+        "• Morning: Flexible activity (city tour, safari, beach time, or cultural visit).\n";
+      out +=
+        "• Afternoon: Another activity or free time.\n";
+      out +=
+        "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
     }
   }
 
@@ -275,7 +306,10 @@ async function generateItineraryText(destination, details) {
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini", // good balance of cost + quality
       messages: [
-        { role: "system", content: "You create structured, day-by-day travel itineraries worldwide." },
+        {
+          role: "system",
+          content: "You create structured, day-by-day travel itineraries worldwide.",
+        },
         { role: "user", content: prompt },
       ],
       temperature: 0.7,
@@ -291,6 +325,52 @@ async function generateItineraryText(destination, details) {
     console.error("Error calling AI for itinerary:", err);
     return generateItineraryFallback(destination, details);
   }
+}
+
+// ===== PDF + S3 HELPERS =====
+
+function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 50 });
+      const chunks = [];
+
+      doc.on("data", (chunk) => chunks.push(chunk));
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.on("error", reject);
+
+      doc.fontSize(20).text(title, { align: "center" });
+      doc.moveDown();
+
+      doc.fontSize(11).text(itineraryText, {
+        align: "left",
+      });
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+async function uploadItineraryPdfToS3(buffer, key) {
+  if (!S3_BUCKET || !S3_BASE_URL) {
+    throw new Error("S3_BUCKET or S3_BASE_URL not configured");
+  }
+
+  const objectKey = `itineraries/${key}.pdf`;
+
+  const command = new PutObjectCommand({
+    Bucket: S3_BUCKET,
+    Key: objectKey,
+    Body: buffer,
+    ContentType: "application/pdf",
+    ACL: "public-read", // assumes bucket allows ACLs; adjust if using bucket policy
+  });
+
+  await s3.send(command);
+
+  return `${S3_BASE_URL}/${objectKey}`;
 }
 
 // ===== PAYSTACK WEBHOOK – confirm payment automatically =====
@@ -324,10 +404,10 @@ app.post("/paystack/webhook", async (req, res) => {
           const details = row.raw_details || "";
           const dest = row.last_destination || "your trip";
 
-          // 1) Generate itinerary text
+          // 1) Generate itinerary text (AI)
           const itineraryText = await generateItineraryText(dest, details);
 
-          // 2) Save it into DB
+          // 2) Save text into DB
           await db.query(
             `UPDATE itinerary_requests
              SET itinerary_text = $1
@@ -335,15 +415,35 @@ app.post("/paystack/webhook", async (req, res) => {
             [itineraryText, row.id]
           );
 
-          // 3) Send it to the user
-          const msg =
-            "🎉 *Payment received successfully!* Thank you.\n\n" +
-            `Here is your *draft itinerary* for *${dest}*:\n\n` +
-            itineraryText +
-            "\n\nYou can reply with *EDIT ITINERARY* to request changes within the next *3 days*, " +
-            "or *ITINERARY* any time to view this plan again.";
+          // 3) Generate PDF buffer
+          const pdfTitle = `Itinerary for ${dest}`;
+          const pdfBuffer = await generateItineraryPdfBuffer(
+            itineraryText,
+            pdfTitle
+          );
 
-          await sendWhatsApp(wa, msg);
+          // 4) Upload to S3, get public URL
+          const pdfUrl = await uploadItineraryPdfToS3(
+            pdfBuffer,
+            `itinerary_${row.id}`
+          );
+
+          // 5) Save PDF URL in DB
+          await db.query(
+            `UPDATE itinerary_requests
+             SET itinerary_pdf_url = $1
+             WHERE id = $2`,
+            [pdfUrl, row.id]
+          );
+
+          // 6) Send a short confirmation + PDF via WhatsApp (avoids 1600-char limit)
+          const shortMsg =
+            "🎉 *Payment received successfully!* Thank you.\n\n" +
+            `I’ve created your *custom itinerary* for *${dest}* as a PDF.\n` +
+            "📄 Please open the attached file to view your day-by-day plan.\n\n" +
+            "You can reply with *EDIT ITINERARY* within the next *3 days* to request changes.";
+
+          await sendWhatsAppMedia(wa, shortMsg, pdfUrl);
         } else {
           console.warn("No itinerary_request found for reference:", reference);
         }
@@ -378,7 +478,7 @@ app.post("/webhook", async (req, res) => {
     if (text === "itinerary" || text === "my itinerary") {
       try {
         const r = await db.query(
-          `SELECT id, itinerary_text, editable_until, payment_status
+          `SELECT id, itinerary_text, itinerary_pdf_url, editable_until, payment_status
            FROM itinerary_requests
            WHERE whatsapp_number = $1
              AND payment_status = 'paid'
@@ -387,7 +487,10 @@ app.post("/webhook", async (req, res) => {
           [from]
         );
 
-        if (r.rowCount === 0 || !r.rows[0].itinerary_text) {
+        if (
+          r.rowCount === 0 ||
+          (!r.rows[0].itinerary_text && !r.rows[0].itinerary_pdf_url)
+        ) {
           await sendWhatsApp(
             from,
             "I couldn’t find any paid itineraries for this number yet. You can get one by choosing *5* from the main menu."
@@ -404,10 +507,28 @@ app.post("/webhook", async (req, res) => {
               " (Africa/Nairobi time).";
           }
 
-          await sendWhatsApp(
-            from,
-            "Here is your latest itinerary:\n\n" + row.itinerary_text + extra
-          );
+          if (row.itinerary_pdf_url) {
+            // Prefer PDF to avoid long SMS limits
+            await sendWhatsAppMedia(
+              from,
+              "Here is your latest itinerary as a PDF. 📄" + extra,
+              row.itinerary_pdf_url
+            );
+          } else {
+            // Fallback to truncated text if no PDF is available
+            let txt =
+              row.itinerary_text ||
+              "I have your itinerary, but I couldn’t load the details.";
+            if (txt.length > 1500) {
+              txt =
+                txt.slice(0, 1500) +
+                "\n\n(Shortened. Please request a new PDF itinerary if needed.)";
+            }
+            await sendWhatsApp(
+              from,
+              "Here is your latest itinerary:\n\n" + txt + extra
+            );
+          }
         }
       } catch (err) {
         console.error("Error fetching itinerary:", err);
