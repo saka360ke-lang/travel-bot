@@ -6,6 +6,7 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
 const twilio = require("twilio");
+const OpenAI = require("openai");
 const { Pool } = require("pg");
 
 const app = express();
@@ -52,6 +53,10 @@ const client = twilio(accountSid, authToken);
 
 const db = new Pool({
   connectionString: DATABASE_URL,
+});
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
 // ===== PAYSTACK CONFIG (KES) =====
@@ -213,13 +218,13 @@ function extractDaysFromDetails(details) {
   const m = details.match(/(\d+)\s*(day|days)/i);
   if (m) {
     const n = parseInt(m[1], 10);
-    if (!isNaN(n) && n > 0 && n <= 30) return n;
+    if (!isNaN(n) && n > 0 && n <= 60) return n;
   }
   return null;
 }
 
-// Simple generator (no AI) – safe and reliable
-async function generateItineraryText(destination, details) {
+// Fallback template if AI fails
+function generateItineraryFallback(destination, details) {
   const days = extractDaysFromDetails(details) || 5; // default 5 days
   let out = `🧳 *Draft Itinerary for ${destination}*\n`;
   out += `_This is a first draft based on the info you shared. We can tweak it within 3 days._\n\n`;
@@ -230,11 +235,9 @@ async function generateItineraryText(destination, details) {
       out += `• Arrival in ${destination}, transfer to your accommodation.\n`;
       out += "• Easy walk / rest, get familiar with the area.\n\n";
     } else {
-      out +=
-        "• Morning: Flexible activity (city tour, safari, beach time, or cultural visit).\n";
+      out += "• Morning: Flexible activity (city tour, safari, beach time, or cultural visit).\n";
       out += "• Afternoon: Another activity or free time.\n";
-      out +=
-        "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
+      out += "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
     }
   }
 
@@ -244,6 +247,50 @@ async function generateItineraryText(destination, details) {
     "• I’ll soon plug in specific *tours, hotels & transfers* from Hugu Adventures’ partners.\n";
 
   return out;
+}
+
+// AI-powered itinerary generation
+async function generateItineraryText(destination, details) {
+  const days = extractDaysFromDetails(details) || 5;
+
+  const prompt =
+    "You are a professional global travel planner creating realistic, bookable-style itineraries.\n\n" +
+    `Traveler request:\n"${details}"\n\n` +
+    `Destination(s): ${destination}\n` +
+    `Length: ${days} days\n\n` +
+    "Constraints:\n" +
+    "- Assume they will book tours and activities via Viator and stays via Booking.com or local operators.\n" +
+    "- Focus on a mix of must-see highlights and relaxed time.\n" +
+    "- No prices. No specific company names.\n\n" +
+    "Output format (WhatsApp-friendly):\n" +
+    "- Start with a short title line like: 🧳 *6-Day Arusha & Ngorongoro Adventure*\n" +
+    "- Then for each day:\n" +
+    "  *Day X: Short title*\n" +
+    "  • Morning: ...\n" +
+    "  • Afternoon: ...\n" +
+    "  • Evening: ...\n" +
+    "- Keep total under about 350–400 words.\n";
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini", // good balance of cost + quality
+      messages: [
+        { role: "system", content: "You create structured, day-by-day travel itineraries worldwide." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.7,
+    });
+
+    const text = completion.choices[0]?.message?.content?.trim();
+    if (!text) {
+      console.warn("AI returned empty itinerary, using fallback");
+      return generateItineraryFallback(destination, details);
+    }
+    return text;
+  } catch (err) {
+    console.error("Error calling AI for itinerary:", err);
+    return generateItineraryFallback(destination, details);
+  }
 }
 
 // ===== PAYSTACK WEBHOOK – confirm payment automatically =====
