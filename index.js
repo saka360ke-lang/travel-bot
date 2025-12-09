@@ -41,8 +41,10 @@ const authToken = TWILIO_AUTH || TWILIO_AUTH_TOKEN;
 
 // Minimal safe debug (no secrets printed)
 console.log(
-  "Twilio SID present:", !!accountSid,
-  "| Twilio number present:", !!TWILIO_NUMBER
+  "Twilio SID present:",
+  !!accountSid,
+  "| Twilio number present:",
+  !!TWILIO_NUMBER
 );
 
 const client = twilio(accountSid, authToken);
@@ -52,7 +54,10 @@ const db = new Pool({
 });
 
 const paystackBase = PAYSTACK_BASE_URL || "https://api.paystack.co";
-const itineraryPriceKES = parseInt(process.env.ITINERARY_AMOUNT_KES || "600", 10); // e.g. 600 KES
+const itineraryPriceKES = parseInt(
+  process.env.ITINERARY_AMOUNT_KES || "600",
+  10
+); // e.g. 600 KES
 const itineraryCurrency = ITINERARY_CURRENCY || "KES";
 
 // Convert to smallest unit (KES → cents)
@@ -85,7 +90,7 @@ async function sendWhatsApp(to, body) {
   });
 }
 
-//Payment Helper//
+// ===== Payment Helper =====
 // Create Paystack payment link for itinerary
 async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
   // Clean up phone to digits only
@@ -111,12 +116,16 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
     callback_url: "https://your-domain.com/payment/thanks",
   };
 
-  const res = await axios.post(`${paystackBase}/transaction/initialize`, payload, {
-    headers: {
-      Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-      "Content-Type": "application/json",
-    },
-  });
+  const res = await axios.post(
+    `${paystackBase}/transaction/initialize`,
+    payload,
+    {
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
 
   const data = res.data;
   if (!data.status) {
@@ -137,10 +146,7 @@ function buildTourLinks(destination) {
   const base =
     VIATOR_BASE_URL ||
     "https://your-viator-affiliate-search-url.com/search?q=";
-  return [
-    `${base}${encoded}`,
-    `${base}${encoded}&page=2`,
-  ];
+  return [`${base}${encoded}`, `${base}${encoded}&page=2`];
 }
 
 // Booking.com / hotels links
@@ -149,10 +155,7 @@ function buildHotelLinks(destination) {
   const base =
     BOOKING_BASE_URL ||
     "https://your-booking-affiliate-search-url.com/search?q=";
-  return [
-    `${base}${encoded}`,
-    `${base}${encoded}&page=2`,
-  ];
+  return [`${base}${encoded}`, `${base}${encoded}&page=2`];
 }
 
 // Flights links (e.g. Skyscanner/Kiwi)
@@ -190,8 +193,58 @@ function itineraryUpsellText(destination) {
   );
 }
 
-// ===== WEBHOOK HANDLER =====
+// ===== Paystack Webhook – to confirm payment automatically =====
+app.post(
+  "/paystack/webhook",
+  express.json({ type: "*/*" }),
+  async (req, res) => {
+    const signature = req.headers["x-paystack-signature"];
 
+    // Optional: verify signature with PAYSTACK_SECRET_KEY (recommended in production)
+    // For now, we'll just trust Paystack IP + HTTPS (but you should add verification later).
+
+    const event = req.body;
+
+    console.log("Paystack webhook event:", JSON.stringify(event, null, 2));
+
+    if (event.event === "charge.success") {
+      const reference = event.data.reference;
+      const status = event.data.status; // should be "success"
+
+      try {
+        // Update itinerary_requests with paid status
+        const updateRes = await db.query(
+          `UPDATE itinerary_requests
+           SET payment_status = 'paid'
+           WHERE paystack_reference = $1
+           RETURNING id, whatsapp_number`,
+          [reference]
+        );
+
+        if (updateRes.rowCount > 0) {
+          const row = updateRes.rows[0];
+          const wa = row.whatsapp_number;
+
+          // Notify user on WhatsApp
+          await sendWhatsApp(
+            wa,
+            "🎉 Payment received successfully! Thank you.\n\n" +
+              "I’ll now start working on your *custom itinerary* and share a draft with you here. " +
+              "You’ll be able to request edits for up to *3 days* after it’s sent. 🧳✨"
+          );
+        } else {
+          console.warn("No itinerary_request found for reference:", reference);
+        }
+      } catch (err) {
+        console.error("Error handling Paystack webhook:", err);
+      }
+    }
+
+    res.status(200).send("OK");
+  }
+);
+
+// ===== WhatsApp WEBHOOK HANDLER =====
 app.post("/webhook", async (req, res) => {
   const from = req.body.From; // e.g. 'whatsapp:+2547...'
   const body = (req.body.Body || "").trim();
@@ -207,57 +260,6 @@ app.post("/webhook", async (req, res) => {
       res.status(200).end(); // empty body → no extra "OK" message in WhatsApp
     }
   };
-
-  // Paystack webhook – to confirm payment automatically
-app.post("/paystack/webhook", express.json({ type: "*/*" }), async (req, res) => {
-  const signature = req.headers["x-paystack-signature"];
-
-  // Optional: verify signature with PAYSTACK_SECRET_KEY (recommended in production)
-  // For now, we'll just trust Paystack IP + HTTPS (but you should add verification later).
-
-  const event = req.body;
-
-  console.log("Paystack webhook event:", JSON.stringify(event, null, 2));
-
-  if (event.event === "charge.success") {
-    const reference = event.data.reference;
-    const status = event.data.status; // should be "success"
-
-    try {
-      // Update itinerary_requests with paid status
-      const updateRes = await db.query(
-        `UPDATE itinerary_requests
-         SET payment_status = 'paid'
-         WHERE paystack_reference = $1
-         RETURNING id, whatsapp_number`,
-        [reference]
-      );
-
-      if (updateRes.rowCount > 0) {
-        const row = updateRes.rows[0];
-        const wa = row.whatsapp_number;
-
-        // Notify user on WhatsApp
-        await sendWhatsApp(
-          wa,
-          "🎉 Payment received successfully! Thank you.\n\n" +
-            "I’ll now start working on your *custom itinerary* and share a draft with you here. " +
-            "You’ll be able to request edits for up to *3 days* after it’s sent. 🧳✨"
-        );
-      } else {
-        console.warn("No itinerary_request found for reference:", reference);
-      }
-    } catch (err) {
-      console.error("Error handling Paystack webhook:", err);
-    }
-  }
-
-  res.status(200).send("OK");
-});
-
-// Paystack webhook – called by Paystack when payment status changes
-app.post("/paystack/webhook", async (req, res) => {
-  console.log("Paystack webhook RAW body:", JSON.stringify(req.body, null, 2));
 
   try {
     // ===== GLOBAL COMMANDS =====
@@ -412,68 +414,67 @@ app.post("/paystack/webhook", async (req, res) => {
       }
 
       case "ASK_ITINERARY_DETAILS": {
-  session.itineraryDetails = body;
+        session.itineraryDetails = body;
 
-  let rowId = null;
-  let paystackRef = null;
-  let payLink = null;
+        let rowId = null;
+        let paystackRef = null;
+        let payLink = null;
 
-  try {
-    // 1. Insert into DB with pending payment
-    const insertRes = await db.query(
-      `INSERT INTO itinerary_requests
-       (whatsapp_number, last_service, last_destination, raw_details, amount_cents, currency, payment_status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending')
-       RETURNING id`,
-      [
-        from,
-        session.lastService,
-        session.lastDestination,
-        body,
-        itineraryAmountSmallest,
-        itineraryCurrency,
-      ]
-    );
+        try {
+          // 1. Insert into DB with pending payment
+          const insertRes = await db.query(
+            `INSERT INTO itinerary_requests
+             (whatsapp_number, last_service, last_destination, raw_details, amount_cents, currency, payment_status)
+             VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+             RETURNING id`,
+            [
+              from,
+              session.lastService,
+              session.lastDestination,
+              body,
+              itineraryAmountSmallest,
+              itineraryCurrency,
+            ]
+          );
 
-    rowId = insertRes.rows[0].id;
+          rowId = insertRes.rows[0].id;
 
-    // 2. Create Paystack payment
-    const payInit = await createItineraryPayment(from, rowId);
-    paystackRef = payInit.reference;
-    payLink = payInit.authorization_url;
+          // 2. Create Paystack payment
+          const payInit = await createItineraryPayment(from, rowId);
+          paystackRef = payInit.reference;
+          payLink = payInit.authorization_url;
 
-    // 3. Update DB with paystack_reference
-    await db.query(
-      `UPDATE itinerary_requests
-       SET paystack_reference = $1
-       WHERE id = $2`,
-      [paystackRef, rowId]
-    );
-  } catch (dbErr) {
-    console.error("Failed to save itinerary or init Paystack:", dbErr);
-    await sendWhatsApp(
-      from,
-      "Sorry 😔 I had trouble preparing the payment link. Please type *MENU* and try again in a moment."
-    );
-    session.state = "MAIN_MENU";
-    break;
-  }
+          // 3. Update DB with paystack_reference
+          await db.query(
+            `UPDATE itinerary_requests
+             SET paystack_reference = $1
+             WHERE id = $2`,
+            [paystackRef, rowId]
+          );
+        } catch (dbErr) {
+          console.error("Failed to save itinerary or init Paystack:", dbErr);
+          await sendWhatsApp(
+            from,
+            "Sorry 😔 I had trouble preparing the payment link. Please type *MENU* and try again in a moment."
+          );
+          session.state = "MAIN_MENU";
+          break;
+        }
 
-  // 4. Send payment link to user
-  await sendWhatsApp(
-    from,
-    "Thank you! 🙏\nI’ve noted your trip details:\n\n" +
-      body +
-      "\n\nTo proceed with your *custom itinerary* (from *$5*), please complete payment using this secure link:\n\n" +
-      `💳 *Payment link*: ${payLink}\n\n` +
-      "Once payment is confirmed, I’ll start creating your detailed itinerary. You’ll be able to request edits for up to *3 days* after delivery. 🧳✨\n\n" +
-      "Type *MENU* to go back."
-  );
+        // 4. Send payment link to user
+        await sendWhatsApp(
+          from,
+          "Thank you! 🙏\nI’ve noted your trip details:\n\n" +
+            body +
+            "\n\nTo proceed with your *custom itinerary* (from *$5*), please complete payment using this secure link:\n\n" +
+            `💳 *Payment link*: ${payLink}\n\n` +
+            "Once payment is confirmed, I’ll start creating your detailed itinerary. You’ll be able to request edits for up to *3 days* after delivery. 🧳✨\n\n" +
+            "Type *MENU* to go back."
+        );
 
-  session.state = "MAIN_MENU";
-  break;
-}
-
+        session.state = "MAIN_MENU";
+        break;
+      }
 
       default: {
         session.state = "MAIN_MENU";
