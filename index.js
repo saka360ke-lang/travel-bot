@@ -34,7 +34,10 @@ const accountSid = TWILIO_SID || TWILIO_ACCOUNT_SID;
 const authToken = TWILIO_AUTH || TWILIO_AUTH_TOKEN;
 
 // Minimal safe debug (no secrets printed)
-console.log("Twilio SID present:", !!accountSid, "Twilio number present:", !!TWILIO_NUMBER);
+console.log(
+  "Twilio SID present:", !!accountSid,
+  "| Twilio number present:", !!TWILIO_NUMBER
+);
 
 const client = twilio(accountSid, authToken);
 
@@ -179,7 +182,13 @@ app.post("/webhook", async (req, res) => {
             "Awesome! 🎟\nWhich *city or destination* are you interested in for tours?\n\nExample: *Nairobi*, *Diani*, *Dubai*"
           );
         } else if (text === "2") {
-typeof text === "3") {
+          session.state = "ASK_HOTEL_DEST";
+          session.lastService = "hotels";
+          await sendWhatsApp(
+            from,
+            "Great! 🏨\nWhich *city or area* do you want to stay in?\n\nExample: *Nairobi CBD*, *Westlands*, *Diani Beach*"
+          );
+        } else if (text === "3") {
           session.state = "ASK_FLIGHT_ROUTE";
           session.lastService = "flights";
           await sendWhatsApp(
