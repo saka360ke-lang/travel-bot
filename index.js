@@ -257,7 +257,7 @@ app.post("/paystack/webhook", express.json({ type: "*/*" }), async (req, res) =>
 
 // Paystack webhook – called by Paystack when payment status changes
 app.post("/paystack/webhook", async (req, res) => {
-  console.log("Paystack webhook RAW body:"
+  console.log("Paystack webhook RAW body:", JSON.stringify(req.body, null, 2));
 
   try {
     // ===== GLOBAL COMMANDS =====
