@@ -365,7 +365,7 @@ async function uploadItineraryPdfToS3(buffer, key) {
     Key: objectKey,
     Body: buffer,
     ContentType: "application/pdf",
-    ACL: "public-read", // assumes bucket allows ACLs; adjust if using bucket policy
+    // No ACL here – bucket policy will handle public access
   });
 
   await s3.send(command);
