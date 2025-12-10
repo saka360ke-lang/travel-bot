@@ -288,6 +288,47 @@ function generateItineraryFallback(destination, details) {
 }
 
 // AI-powered itinerary generation
+async function generateTravelAnswer(question, from) {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are Hugu Adventures’ friendly travel assistant. " +
+            "Give concise, practical answers to travel questions (flights, safety, seasons, packing, visas, etc.). " +
+            "Focus on clear, helpful advice and avoid huge essays. " +
+            "If asked for something you’re not sure about (like live prices or real-time weather), say so briefly and suggest how to check.",
+        },
+        {
+          role: "user",
+          content: question,
+        },
+      ],
+      max_tokens: 350,
+      temperature: 0.7,
+    });
+
+    let answer =
+      completion.choices?.[0]?.message?.content?.trim() ||
+      "I’m not sure how to answer that one, but I’ll get smarter soon.";
+
+    // Safety: keep under ~1200 chars so we never hit Twilio 1600 limit
+    if (answer.length > 1200) {
+      answer = answer.slice(0, 1180) + "\n\n(Shortened to fit WhatsApp limits.)";
+    }
+
+    return answer;
+  } catch (err) {
+    console.error("Error from OpenAI travel Q&A:", err);
+    return (
+      "Sorry, I had trouble answering that question just now.\n\n" +
+      "Please try rephrasing, or type *MENU* to go back."
+    );
+  }
+}
+
 async function generateItineraryText(destination, details) {
   const days = extractDaysFromDetails(details) || 5;
 
@@ -739,17 +780,25 @@ app.post("/webhook", async (req, res) => {
       }
 
       case "ASK_TRAVEL_QUESTION": {
-        await sendWhatsApp(
-          from,
-          "Thanks for your question! 🙌\nRight now I’m in early beta, so I’ll give you a simple suggestion:\n\n" +
-            "👉 *" +
-            body +
-            "* sounds exciting! For now, I recommend checking trusted resources and local operators. " +
-            "Soon I’ll be upgraded to give much smarter travel answers. 😊\n\nType *MENU* to go back."
-        );
-        // stay in this state so they can ask more
-        break;
-      }
+  // User just sent a free-form question like:
+  // "What's the current weather like in Nyeri?"
+  const question = body;
+
+  // Call AI helper
+  const answer = await generateTravelAnswer(question, from);
+
+  await sendWhatsApp(
+    from,
+    "🧭 *Travel Q&A*\n\n" +
+      `*Your question:*\n${question}\n\n` +
+      `*My answer:*\n${answer}\n\n` +
+      "You can ask another question, or type *MENU* to go back."
+  );
+
+  // Stay in ASK_TRAVEL_QUESTION so they can continue the mini-conversation
+  break;
+}
+
 
       case "AFTER_LINKS": {
         if (text === "yes" || text === "y") {
