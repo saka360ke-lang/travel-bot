@@ -89,7 +89,10 @@ const itineraryAmountSmallest = itineraryPriceKES * 100;
 
 // ===== SIMPLE IN-MEMORY SESSION STORE =====
 const sessions = {};
-// sessions[from] = { state, lastDestination, lastService, itineraryDetails, currentItineraryId }
+// sessions[from] = { state, lastDestination, lastService, itineraryDetails }
+// state: NEW, MAIN_MENU, ASK_TOUR_DEST, ASK_HOTEL_DEST, ASK_FLIGHT_ROUTE,
+//        ASK_TRAVEL_QUESTION, AFTER_LINKS, ASK_ITINERARY_DETAILS,
+//        ASK_TRIP_INSPIRATION, EDIT_ITINERARY_DETAILS, ...
 
 // Helper: get or create session
 function getSession(from) {
@@ -229,8 +232,9 @@ function mainMenuText() {
     "2️⃣ Find *hotels / stays*\n" +
     "3️⃣ Find *flights*\n" +
     "4️⃣ Ask a *travel question*\n" +
-    "5️⃣ Get a *custom itinerary* (from *$5*)\n\n" +
-    "Reply with *1, 2, 3, 4 or 5*."
+    "5️⃣ Get a *custom itinerary* (from *$5*)\n" +
+    "6️⃣ Get *trip inspiration* (free ideas)\n\n" +
+    "Reply with *1, 2, 3, 4, 5 or 6*."
   );
 }
 
@@ -372,6 +376,50 @@ async function generateItineraryText(destination, details) {
   } catch (err) {
     console.error("Error calling AI for itinerary:", err);
     return generateItineraryFallback(destination, details);
+  }
+}
+
+async function generateTripInspiration(preferences, from) {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are Hugu Adventures’ playful trip-inspiration assistant. " +
+            "Given a short description of what the user wants (duration, budget, region, interests), " +
+            "suggest 2–3 concrete trip ideas. Each idea should have a title and 3–4 bullet points. " +
+            "Keep the language exciting but clear. Assume the user can be anywhere in the world.",
+        },
+        {
+          role: "user",
+          content:
+            "User preferences:\n" +
+            preferences +
+            "\n\nReturn WhatsApp-friendly text under about 1200 characters.",
+        },
+      ],
+      max_tokens: 450,
+      temperature: 0.9,
+    });
+
+    let text =
+      completion.choices?.[0]?.message?.content?.trim() ||
+      "Here are a few ideas: a city break, a beach escape, or a short safari. I’ll be smarter soon.";
+
+    // Safety: keep under ~1200 chars to avoid Twilio’s 1600-char combined limit
+    if (text.length > 1200) {
+      text = text.slice(0, 1180) + "\n\n(Shortened for WhatsApp.)";
+    }
+
+    return text;
+  } catch (err) {
+    console.error("Error from OpenAI trip inspiration:", err);
+    return (
+      "Sorry, I had trouble generating trip ideas just now. 😅\n\n" +
+      "Please try again in a moment, or type *MENU* to go back."
+    );
   }
 }
 
@@ -687,52 +735,63 @@ app.post("/webhook", async (req, res) => {
       }
 
       case "MAIN_MENU": {
-        if (text === "1") {
-          session.state = "ASK_TOUR_DEST";
-          session.lastService = "tours";
-          await sendWhatsApp(
-            from,
-            "Awesome! 🎟\nWhich *city or destination* are you interested in for tours?\n\nExample: *Nairobi*, *Diani*, *Dubai*"
-          );
-        } else if (text === "2") {
-          session.state = "ASK_HOTEL_DEST";
-          session.lastService = "hotels";
-          await sendWhatsApp(
-            from,
-            "Great! 🏨\nWhich *city or area* do you want to stay in?\n\nExample: *Nairobi CBD*, *Westlands*, *Diani Beach*"
-          );
-        } else if (text === "3") {
-          session.state = "ASK_FLIGHT_ROUTE";
-          session.lastService = "flights";
-          await sendWhatsApp(
-            from,
-            "✈️ Nice!\nPlease type your route in this format:\n\n*From City → To City*\nExample: *Nairobi → Cape Town*"
-          );
-        } else if (text === "4") {
-          session.state = "ASK_TRAVEL_QUESTION";
-          await sendWhatsApp(
-            from,
-            "Sure! ✨\nAsk me anything about *Kenya, East Africa, or trip planning* and I’ll do my best to help."
-          );
-        } else if (text === "5") {
-          session.state = "ASK_ITINERARY_DETAILS";
-          await sendWhatsApp(
-            from,
-            "Amazing! 🧳\nLet’s get some details so I can prepare a *custom itinerary* (from *$5*).\n\n" +
-              "Please reply in this format:\n" +
-              "*Destination(s)*:\n" +
-              "*Number of days*:\n" +
-              "*Rough budget* (low / mid / luxury):\n" +
-              "*Travel month*:"
-          );
-        } else {
-          await sendWhatsApp(
-            from,
-            "Sorry, I didn’t understand that.\n\n" + mainMenuText()
-          );
-        }
-        break;
-      }
+  if (text === "1") {
+    // ... existing tours logic ...
+  } else if (text === "2") {
+    // ... existing hotels logic ...
+  } else if (text === "3") {
+    // ... existing flights logic ...
+  } else if (text === "4") {
+    session.state = "ASK_TRAVEL_QUESTION";
+    await sendWhatsApp(
+      from,
+      "Sure! ✨\nAsk me anything about *Kenya, East Africa, or trip planning* and I’ll do my best to help."
+    );
+  } else if (text === "5") {
+    // ... existing custom itinerary logic ...
+  } else if (text === "6") {
+    // NEW: Trip inspiration entry
+    session.state = "ASK_TRIP_INSPIRATION";
+    await sendWhatsApp(
+      from,
+      "Love it! 🌍✨\nTell me a bit about what you’re dreaming of.\n\n" +
+        "You can reply in *one message* like this:\n" +
+        "*From*: (your country or city)\n" +
+        "*Where to*: (region or “surprise me”)\n" +
+        "*Number of days*:\n" +
+        "*Budget*: low / mid / luxury\n" +
+        "*Who*: solo / couple / family / friends\n" +
+        "*Travel month*:\n\n" +
+        "Example:\n" +
+        "“From Nairobi, 4–5 days, mid-budget, for a couple, somewhere beachy in April.”"
+    );
+  } else {
+    await sendWhatsApp(
+      from,
+      "Sorry, I didn’t understand that.\n\n" + mainMenuText()
+    );
+  }
+  break;
+}
+
+    case "ASK_TRIP_INSPIRATION": {
+  const prefs = body; // whatever the user typed as their dream trip
+
+  const ideas = await generateTripInspiration(prefs, from);
+
+  await sendWhatsApp(
+    from,
+    "🌍 *Trip inspiration for you*\n\n" +
+      ideas +
+      "\n\nIf you’d like me to turn one of these into a *day-by-day custom itinerary* with links, " +
+      "reply with *5* to start the paid itinerary flow, or type *MENU* to go back."
+  );
+
+  // After sending ideas, go back to MAIN_MENU (simpler UX)
+  session.state = "MAIN_MENU";
+  break;
+}
+
 
       case "ASK_TOUR_DEST": {
         const dest = body;
