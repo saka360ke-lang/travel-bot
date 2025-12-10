@@ -447,82 +447,63 @@ Now, using the information above, write the full itinerary.
   return text;
 }
 
-async function generateUpdatedItineraryText({
-  originalItineraryText,
-  userEditRequest,
-  keyCities,
-}) {
-  const viatorLinksBlock = buildViatorLinksBlock(keyCities);
-
+async function generateUpdatedItineraryText(originalRequestText, updatedRequestText) {
   const systemPrompt = `
-You are a professional travel planner editing an existing itinerary for Hugu Adventures customers.
+You are Hugu Adventures' trip designer. You write polished, friendly, professional travel itineraries for WhatsApp users.
 
-Your job:
-- Carefully read the original itinerary and the user's change request.
-- Produce a *new full itinerary* that:
-  - Keeps everything that still makes sense.
-  - Updates days, routing, and activities according to the new request.
-  - Preserves the same friendly, professional tone and formatting style.
-  `.trim();
+Always:
+- Write in clear paragraphs and bullet points.
+- Use a warm, helpful, excited tone but keep it readable.
+- Respect the user’s budget (low / mid / luxury), trip length, and who is travelling (solo / couple / family / friends).
+- Spread out sightseeing so days are not too overloaded.
+- Where the user mentions road travel, include approximate driving times and distances between key stops (e.g. “Approx 280 km / 3.5 hours”).
+- For flights between cities, state approximate flight duration (e.g. “Flight ~3 hours”).
+- For each day, suggest 1–3 key activities or highlights.
+- For each activity, if a Viator link placeholder is provided to you, include it as: [Book Tour Here](VIATOR_URL_PLACEHOLDER).
+- Do NOT invent real URLs – just keep the placeholders I give you.
+- Keep total length suitable for a PDF (not insanely long, but detailed enough to feel valuable).
+`;
 
   const userPrompt = `
-You are editing an existing itinerary after the traveller requested changes.
+The user bought a paid custom itinerary and now wants an updated itinerary.
 
-ORIGINAL ITINERARY:
-"""
-${originalItineraryText}
-"""
+Original request:
+${originalRequestText}
 
-USER'S CHANGE REQUEST:
-"""
-${userEditRequest}
-"""
+Updated request:
+${updatedRequestText}
 
-KEY DESTINATIONS & VIATOR AFFILIATE LINKS (Markdown):
-${viatorLinksBlock}
+Please generate a revised full day-by-day itinerary that matches the UPDATED request, but you can reuse and improve ideas from the original plan.
 
-EDITING INSTRUCTIONS:
+Formatting rules:
+- Start with a clear title on its own line, for example:
+  **__12-Day Australia Road Adventure from Sydney (Low Budget Solo)__**
+- For each day, use this structure:
 
-1) Apply the user's requested changes clearly.
-   - If they change destinations or number of days, adjust the structure accordingly.
-   - If they ask for more road-trip focus, spread out sights by road with realistic drive times and distances.
-   - If they ask for more detail (e.g. drive times, distances, more activities), enrich each day accordingly.
+*Day X: Short Day Title*  
+• Morning: ... (mention key sights, approx driving/flying time if applicable)  
+• Afternoon: ...  
+• Evening: ...  
 
-2) Maintain the same *general format* as the original itinerary:
-   - Start with **Trip Title** and **Trip Overview**.
-   - Use "### __Day X: Title__" for each day.
-   - Include **Approx travel** for city-to-city moves with km + hours.
-   - Keep **Morning / Afternoon / Evening** sections.
-
-3) ACTIVITY RECOMMENDATIONS WITH AFFILIATE LINKS
-   - Keep or add a **Suggested activities:** section where helpful.
-   - Use the Markdown affiliate links from the Viator list above; do NOT invent new URLs.
-   - Use appropriate city links, e.g.:
-     - Sydney harbour cruise – [Book Tour Here](SOME_URL)
-   - It is fine to re-use the same affiliate link on multiple days.
-
-4) TONE
-   - Friendly, happy, and helpful.
-   - Make it feel like a thoughtful human travel consultant updated their plan.
-   - Avoid saying things like "As an AI" or referencing that this is an edit.
-
-5) OUTPUT
-   - Return the *full, updated itinerary* only.
-   - Do not include any meta commentary or explanation.
-
-Now rewrite the itinerary accordingly.
-  `.trim();
+- After each activity where I provide Viator search link placeholders such as:
+  [Book Tour Here](VIATOR_LINK_CITY_CORE)
+  [Book Tour Here](VIATOR_LINK_CITY_ADVENTURE)
+  etc., keep them as provided.
+- Focus on spreading the route to cover as many interesting Australian attractions as possible, while remaining realistic for road travel.
+- Assume the starting point and ending point are as per the user’s updated description.
+`;
 
   const response = await openai.responses.create({
-  model: OPENAI_MODEL,
-  input: [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: userPrompt },
-  ],
-});
+    model: OPENAI_MODEL,
+    input: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+  });
 
-  const text = response.output[0].content[0].text;
-  return text;
+  const output =
+    response.output?.[0]?.content?.[0]?.text || "Sorry, I could not generate an itinerary.";
+  return output;
 }
 
 async function generateTripInspiration(preferences, from) {
