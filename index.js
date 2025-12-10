@@ -839,9 +839,9 @@ app.post("/webhook", async (req, res) => {
       }
 
       case "EDIT_ITINERARY_DETAILS": {
-  const editRequest = body; // user’s new message describing changes
+  const editRequest = body; // user’s updated trip details / changes
 
-  // 1) Find the latest PAID, still-editable itinerary for this WhatsApp number
+  // 1) Get latest PAID & editable itinerary
   const { rows } = await db.query(
     `SELECT id, last_destination, raw_details, editable_until
        FROM itinerary_requests
@@ -857,12 +857,73 @@ app.post("/webhook", async (req, res) => {
   if (rows.length === 0) {
     await sendWhatsApp(
       from,
-      "Sorry, I couldn’t find an itinerary that is still within the 3-day edit window. " +
+      "Sorry, I couldn’t find an itinerary that is still within your 3-day edit window. " +
         "If you’d like a new one, please choose option *5* from the MENU."
     );
     session.state = "MAIN_MENU";
     break;
   }
+
+  const current = rows[0];
+  const dest = current.last_destination || "your trip";
+
+  // 2) Build AI context: old details + requested changes
+  const aiDetails =
+    `Original request details:\n${current.raw_details || "N/A"}\n\n` +
+    `User requested changes:\n${editRequest}`;
+
+  // 3) Generate updated itinerary text with AI
+  const updatedText = await generateItineraryText(dest, aiDetails);
+
+  // 4) Save updated details + text to DB
+  await db.query(
+    `UPDATE itinerary_requests
+       SET raw_details = $1,
+           itinerary_text = $2
+     WHERE id = $3`,
+    [editRequest, updatedText, current.id]
+  );
+
+  try {
+    // 5) Generate a NEW S3 key so we don't hit WhatsApp/S3 cache
+    const keyBase = `itinerary_${row.id}_${Date.now()}`;
+    const pdfBuffer = await generateItineraryPdfBuffer(itineraryText, pdfTitle);
+    const pdfUrl = await uploadItineraryPdfToS3(pdfBuffer, keyBase);
+    const pdfTitle = `Updated itinerary for ${dest}`;
+    
+
+    await db.query(
+      `UPDATE itinerary_requests
+         SET itinerary_pdf_url = $1
+       WHERE id = $2`,
+      [pdfUrl, current.id]
+    );
+
+    // 6) Send updated PDF to user
+    const shortMsg =
+      "Here is your *updated itinerary* as a PDF. 📄\n\n" +
+      "You can still request more edits within your 3-day window by sending *EDIT ITINERARY* again.";
+
+    await sendWhatsAppMedia(from, shortMsg, pdfUrl);
+  } catch (err) {
+    console.error("Error sending updated itinerary PDF, falling back to text:", err);
+
+    // Fallback: text version, truncated to respect Twilio limit
+    let msg =
+      "Here is your *updated itinerary*:\n\n" +
+      updatedText +
+      "\n\nYou can still request more edits within your 3-day window by sending *EDIT ITINERARY* again.";
+
+    if (msg.length > 1500) {
+      msg = msg.slice(0, 1500) + "\n\n(Shortened to fit WhatsApp limits.)";
+    }
+
+    await sendWhatsApp(from, msg);
+  }
+
+  session.state = "MAIN_MENU";
+  break;
+}
 
   const current = rows[0];
   const dest = current.last_destination || "your trip";
@@ -926,7 +987,6 @@ app.post("/webhook", async (req, res) => {
   session.state = "MAIN_MENU";
   break;
 }
-
 
       default: {
         session.state = "MAIN_MENU";
