@@ -117,12 +117,19 @@ async function sendWhatsApp(to, body) {
 
 async function sendWhatsAppMedia(to, body, mediaUrl) {
   console.log("Sending media message:", body, "mediaUrl:", mediaUrl);
-  return client.messages.create({
-    from: TWILIO_NUMBER,
-    to,
-    body,
-    mediaUrl: [mediaUrl],
-  });
+  try {
+    const resp = await client.messages.create({
+      from: TWILIO_NUMBER,
+      to,
+      body,
+      mediaUrl: [mediaUrl],
+    });
+    console.log("Twilio media message SID:", resp.sid, "status:", resp.status);
+    return resp;
+  } catch (err) {
+    console.error("Error sending WhatsApp media:", err);
+    throw err;
+  }
 }
 
 // ===== Payment Helper =====
@@ -415,35 +422,64 @@ app.post("/paystack/webhook", async (req, res) => {
             [itineraryText, row.id]
           );
 
-          // 3) Generate PDF buffer
-          const pdfTitle = `Itinerary for ${dest}`;
-          const pdfBuffer = await generateItineraryPdfBuffer(
-            itineraryText,
-            pdfTitle
-          );
+          try {
+            // 3) Generate PDF buffer
+            const pdfTitle = `Itinerary for ${dest}`;
+            const pdfBuffer = await generateItineraryPdfBuffer(
+              itineraryText,
+              pdfTitle
+            );
 
-          // 4) Upload to S3, get public URL
-          const pdfUrl = await uploadItineraryPdfToS3(
-            pdfBuffer,
-            `itinerary_${row.id}`
-          );
+            // 4) Upload to S3, get public URL
+            const pdfUrl = await uploadItineraryPdfToS3(
+              pdfBuffer,
+              `itinerary_${row.id}`
+            );
 
-          // 5) Save PDF URL in DB
-          await db.query(
-            `UPDATE itinerary_requests
-             SET itinerary_pdf_url = $1
-             WHERE id = $2`,
-            [pdfUrl, row.id]
-          );
+            // 5) Save PDF URL in DB
+            await db.query(
+              `UPDATE itinerary_requests
+               SET itinerary_pdf_url = $1
+               WHERE id = $2`,
+              [pdfUrl, row.id]
+            );
 
-          // 6) Send a short confirmation + PDF via WhatsApp (avoids 1600-char limit)
-          const shortMsg =
-            "🎉 *Payment received successfully!* Thank you.\n\n" +
-            `I’ve created your *custom itinerary* for *${dest}* as a PDF.\n` +
-            "📄 Please open the attached file to view your day-by-day plan.\n\n" +
-            "You can reply with *EDIT ITINERARY* within the next *3 days* to request changes.";
+            // 6) Send short WhatsApp message + PDF
+            const shortMsg =
+              "🎉 *Payment received successfully!* Thank you.\n\n" +
+              `I’ve created your *custom itinerary* for *${dest}* as a PDF.\n` +
+              "📄 Please open the attached file to view your day-by-day plan.\n\n" +
+              "You can reply with *EDIT ITINERARY* within the next *3 days* to request changes.";
 
-          await sendWhatsAppMedia(wa, shortMsg, pdfUrl);
+            await sendWhatsAppMedia(wa, shortMsg, pdfUrl);
+
+            // OPTIONAL: also send a tiny text confirmation in case media rendering fails on WhatsApp
+            await sendWhatsApp(
+              wa,
+              "✅ Your itinerary PDF has been sent. If you don’t see it, reply with *ITINERARY* and I’ll resend the text version."
+            );
+          } catch (err) {
+            console.error(
+              "Error generating or uploading PDF, falling back to text:",
+              err
+            );
+
+            // Fallback: send as text, but enforce Twilio 1600-char limit
+            let msg =
+              "🎉 *Payment received successfully!* Thank you.\n\n" +
+              `Here is your *draft itinerary* for *${dest}*:\n\n` +
+              itineraryText +
+              "\n\nYou can reply with *EDIT ITINERARY* to request changes within the next *3 days*, " +
+              "or *ITINERARY* any time to view this plan again.";
+
+            if (msg.length > 1500) {
+              msg =
+                msg.slice(0, 1500) +
+                "\n\n(Shortened to fit WhatsApp limits.)";
+            }
+
+            await sendWhatsApp(wa, msg);
+          }
         } else {
           console.warn("No itinerary_request found for reference:", reference);
         }
