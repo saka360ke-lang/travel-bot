@@ -89,10 +89,7 @@ const itineraryAmountSmallest = itineraryPriceKES * 100;
 
 // ===== SIMPLE IN-MEMORY SESSION STORE =====
 const sessions = {};
-// sessions[from] = { state, lastDestination, lastService, itineraryDetails }
-// state: NEW, MAIN_MENU, ASK_TOUR_DEST, ASK_HOTEL_DEST, ASK_FLIGHT_ROUTE,
-//        ASK_TRAVEL_QUESTION, AFTER_LINKS, ASK_ITINERARY_DETAILS,
-//        ASK_TRIP_INSPIRATION, EDIT_ITINERARY_DETAILS, ...
+// sessions[from] = { state, lastDestination, lastService, itineraryDetails, currentItineraryId }
 
 // Helper: get or create session
 function getSession(from) {
@@ -204,6 +201,18 @@ function buildTourLinks(destination) {
   return [link1, link2];
 }
 
+function buildViatorLinksBlock(keyCities) {
+  if (!keyCities || keyCities.length === 0) return "None.";
+
+  const lines = keyCities.map((city) => {
+    const [generic, recommended] = buildTourLinks(city);
+    const url = recommended || generic;
+    return `- ${city} tours: [Book Tour Here](${url})`;
+  });
+
+  return lines.join("\n");
+}
+
 // Booking.com / hotels links
 function buildHotelLinks(destination) {
   const encoded = encodeURIComponent(destination.trim());
@@ -291,7 +300,7 @@ function generateItineraryFallback(destination, details) {
   return out;
 }
 
-// AI-powered itinerary generation
+// AI-powered itinerary generation – travel Q&A
 async function generateTravelAnswer(question, from) {
   try {
     const completion = await openai.chat.completions.create({
@@ -333,50 +342,180 @@ async function generateTravelAnswer(question, from) {
   }
 }
 
-async function generateItineraryText(destination, details) {
-  const days = extractDaysFromDetails(details) || 5;
+// AI-powered full itinerary generation
+async function generateItineraryText({ tripRequestText, keyCities }) {
+  const viatorLinksBlock = buildViatorLinksBlock(keyCities);
 
-  const prompt =
-    "You are a professional global travel planner creating realistic, bookable-style itineraries.\n\n" +
-    `Traveler request:\n"${details}"\n\n` +
-    `Destination(s): ${destination}\n` +
-    `Length: ${days} days\n\n` +
-    "Constraints:\n" +
-    "- Assume they will book tours and activities via Viator and stays via Booking.com or local operators.\n" +
-    "- Focus on a mix of must-see highlights and relaxed time.\n" +
-    "- No prices. No specific company names.\n\n" +
-    "Output format (WhatsApp-friendly):\n" +
-    "- Start with a short title line like: 🧳 *6-Day Arusha & Ngorongoro Adventure*\n" +
-    "- Then for each day:\n" +
-    "  *Day X: Short title*\n" +
-    "  • Morning: ...\n" +
-    "  • Afternoon: ...\n" +
-    "  • Evening: ...\n" +
-    "- Keep total under about 350–400 words.\n";
+  const systemPrompt = `
+You are a professional travel planner helping Hugu Adventures design detailed, friendly, and realistic trip itineraries.
 
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini", // good balance of cost + quality
-      messages: [
-        {
-          role: "system",
-          content: "You create structured, day-by-day travel itineraries worldwide.",
-        },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.7,
-    });
+Your job:
+- Turn the user's short trip request into a *full, day-by-day itinerary*.
+- Write in a *happy, warm, and helpful* tone that feels human and welcoming, but still clear and structured.
+- Assume the traveller is booking via Hugu Adventures and Viator affiliate links.
+  `.trim();
 
-    const text = completion.choices[0]?.message?.content?.trim();
-    if (!text) {
-      console.warn("AI returned empty itinerary, using fallback");
-      return generateItineraryFallback(destination, details);
-    }
-    return text;
-  } catch (err) {
-    console.error("Error calling AI for itinerary:", err);
-    return generateItineraryFallback(destination, details);
-  }
+  const userPrompt = `
+Create a detailed, professional itinerary document based on the trip request and affiliate links below.
+
+TRIP REQUEST (from traveller):
+"""
+${tripRequestText}
+"""
+
+KEY DESTINATIONS & VIATOR AFFILIATE LINKS (Markdown):
+${viatorLinksBlock}
+
+REQUIREMENTS FOR THE ITINERARY FORMAT:
+
+1) OVERALL STRUCTURE
+- Start with a clear title line like:
+  **__Trip Title: 24-Day Australia Road & Coast Adventure (Sydney, Coast & Reef)__**
+- Then a short paragraph-style *Trip Overview* summarising:
+  - Starting point
+  - Trip style (solo / couple / family, road trip vs city-hopping, etc.)
+  - Duration (x days / y nights)
+  - Budget level (low / mid / luxury)
+  - Who it's ideal for
+
+2) DAILY FORMAT
+For each day, use this structure:
+
+### __Day X: Short Day Name__
+- On the next line, show **approx travel** for any major move:
+  - Example: **Approx travel:** Sydney → Blue Mountains – ~110 km • 1.5–2 hrs by road
+  - If it is a local city day with no long transfers, you can write things like:
+    **Approx travel:** Local walking + short public transport
+
+Then break the day into sections like this:
+
+**Morning**
+- Bullet points for morning activities
+
+**Afternoon**
+- Bullet points for afternoon activities
+
+**Evening**
+- Bullet points for evening / night activities
+
+3) DRIVING / FLIGHT TIME & DISTANCE
+- Whenever the traveller is going from one city/region to another, include a realistic *approximate* distance and driving or flight time.
+- Use kilometers and hours, like:
+  - "~250 km • 3–3.5 hrs by road"
+  - "Flight ~3 hrs (plus airport time)"
+
+4) ACTIVITY RECOMMENDATIONS WITH AFFILIATE LINKS
+- For each day where activities or tours make sense, include a short section:
+  **Suggested activities:**
+  - Use 1–3 bullet points.
+  - Re-use the Markdown affiliate links from the list above; do NOT invent new URLs.
+  - When there is a relevant destination in the day that matches one of the key cities, use that city’s link in a bullet like:
+    - Sydney city tour – [Book Tour Here](SOME_URL)
+    - Great Barrier Reef day cruise – [Book Tour Here](SOME_URL)
+- You are *allowed* to copy the same \`[Book Tour Here](...)\` link multiple times across the itinerary whenever it's relevant.
+
+5) TONE
+- Write like a friendly, knowledgeable travel consultant.
+- Make the trip feel exciting and reassuring.
+- Avoid sounding like a robot or like you are listing raw facts only.
+- Keep it realistic for a low/mid/luxury budget based on the traveller’s request.
+
+6) FINAL TOUCH
+- End with a short, warm closing paragraph, for example:
+  - A reminder they can request edits.
+  - A suggestion that Hugu Adventures can help fine-tune hotels, transfers, and tours.
+
+Now, using the information above, write the full itinerary.
+  `.trim();
+
+  const response = await openai.responses.create({
+    model: "gpt-5.1-mini",
+    input: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+  });
+
+  const text = response.output[0].content[0].text;
+  return text;
+}
+
+async function generateUpdatedItineraryText({
+  originalItineraryText,
+  userEditRequest,
+  keyCities,
+}) {
+  const viatorLinksBlock = buildViatorLinksBlock(keyCities);
+
+  const systemPrompt = `
+You are a professional travel planner editing an existing itinerary for Hugu Adventures customers.
+
+Your job:
+- Carefully read the original itinerary and the user's change request.
+- Produce a *new full itinerary* that:
+  - Keeps everything that still makes sense.
+  - Updates days, routing, and activities according to the new request.
+  - Preserves the same friendly, professional tone and formatting style.
+  `.trim();
+
+  const userPrompt = `
+You are editing an existing itinerary after the traveller requested changes.
+
+ORIGINAL ITINERARY:
+"""
+${originalItineraryText}
+"""
+
+USER'S CHANGE REQUEST:
+"""
+${userEditRequest}
+"""
+
+KEY DESTINATIONS & VIATOR AFFILIATE LINKS (Markdown):
+${viatorLinksBlock}
+
+EDITING INSTRUCTIONS:
+
+1) Apply the user's requested changes clearly.
+   - If they change destinations or number of days, adjust the structure accordingly.
+   - If they ask for more road-trip focus, spread out sights by road with realistic drive times and distances.
+   - If they ask for more detail (e.g. drive times, distances, more activities), enrich each day accordingly.
+
+2) Maintain the same *general format* as the original itinerary:
+   - Start with **Trip Title** and **Trip Overview**.
+   - Use "### __Day X: Title__" for each day.
+   - Include **Approx travel** for city-to-city moves with km + hours.
+   - Keep **Morning / Afternoon / Evening** sections.
+
+3) ACTIVITY RECOMMENDATIONS WITH AFFILIATE LINKS
+   - Keep or add a **Suggested activities:** section where helpful.
+   - Use the Markdown affiliate links from the Viator list above; do NOT invent new URLs.
+   - Use appropriate city links, e.g.:
+     - Sydney harbour cruise – [Book Tour Here](SOME_URL)
+   - It is fine to re-use the same affiliate link on multiple days.
+
+4) TONE
+   - Friendly, happy, and helpful.
+   - Make it feel like a thoughtful human travel consultant updated their plan.
+   - Avoid saying things like "As an AI" or referencing that this is an edit.
+
+5) OUTPUT
+   - Return the *full, updated itinerary* only.
+   - Do not include any meta commentary or explanation.
+
+Now rewrite the itinerary accordingly.
+  `.trim();
+
+  const response = await openai.responses.create({
+    model: "gpt-5.1-mini",
+    input: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+  });
+
+  const text = response.output[0].content[0].text;
+  return text;
 }
 
 async function generateTripInspiration(preferences, from) {
@@ -501,7 +640,16 @@ app.post("/paystack/webhook", async (req, res) => {
           const dest = row.last_destination || "your trip";
 
           // 1) Generate itinerary text (AI)
-          const itineraryText = await generateItineraryText(dest, details);
+          let itineraryText;
+          try {
+            itineraryText = await generateItineraryText({
+              tripRequestText: details || `Trip to ${dest}`,
+              keyCities: row.last_destination ? [row.last_destination] : [],
+            });
+          } catch (genErr) {
+            console.error("Error generating AI itinerary, using fallback:", genErr);
+            itineraryText = generateItineraryFallback(dest, details);
+          }
 
           // 2) Save text into DB
           await db.query(
@@ -734,74 +882,73 @@ app.post("/webhook", async (req, res) => {
         break;
       }
 
-     case "MAIN_MENU": {
-  console.log("STATE MAIN_MENU, user choice:", text);
+      case "MAIN_MENU": {
+        console.log("STATE MAIN_MENU, user choice:", text);
 
-  if (text === "1") {
-    session.state = "ASK_TOUR_DEST";
-    session.lastService = "tours";
-    await sendWhatsApp(
-      from,
-      "Awesome! 🎟\nWhich *city or destination* are you interested in for tours?\n\nExample: *Nairobi*, *Diani*, *Dubai*"
-    );
-  } else if (text === "2") {
-    session.state = "ASK_HOTEL_DEST";
-    session.lastService = "hotels";
-    await sendWhatsApp(
-      from,
-      "Great! 🏨\nWhich *city or area* do you want to stay in?\n\nExample: *Nairobi CBD*, *Westlands*, *Diani Beach*"
-    );
-  } else if (text === "3") {
-    session.state = "ASK_FLIGHT_ROUTE";
-    session.lastService = "flights";
-    await sendWhatsApp(
-      from,
-      "✈️ Nice!\nPlease type your route in this format:\n\n*From City → To City*\nExample: *Nairobi → Cape Town*"
-    );
-  } else if (text === "4") {
-    session.state = "ASK_TRAVEL_QUESTION";
-    await sendWhatsApp(
-      from,
-      "Sure! ✨\nAsk me anything about *Kenya, East Africa, or trip planning* and I’ll do my best to help."
-    );
-  } else if (text === "5") {
-    // CUSTOM ITINERARY FLOW (paid)
-    session.state = "ASK_ITINERARY_DETAILS";
-    await sendWhatsApp(
-      from,
-      "Amazing! 🧳\nLet’s get some details so I can prepare a *custom itinerary* (from *$5*).\n\n" +
-        "Please reply in this format:\n" +
-        "*Destination(s)*:\n" +
-        "*Number of days*:\n" +
-        "*Rough budget* (low / mid / luxury):\n" +
-        "*Travel month*:"
-    );
-  } else if (text === "6") {
-    // TRIP INSPIRATION (free)
-    session.state = "ASK_TRIP_INSPIRATION";
-    await sendWhatsApp(
-      from,
-      "Love it! 🌍✨\nTell me a bit about what you’re dreaming of.\n\n" +
-        "You can reply in *one message* like this:\n" +
-        "*From*: (your country or city)\n" +
-        "*Where to*: (region or “surprise me”)\n" +
-        "*Number of days*:\n" +
-        "*Budget*: low / mid / luxury\n" +
-        "*Who*: solo / couple / family / friends\n" +
-        "*Travel month*:\n\n" +
-        "Example:\n" +
-        "“From Nairobi, 4–5 days, mid-budget, for a couple, somewhere beachy in April.”"
-    );
-  } else {
-    await sendWhatsApp(
-      from,
-      "Sorry, I didn’t understand that.\n\n" + mainMenuText()
-    );
-  }
+        if (text === "1") {
+          session.state = "ASK_TOUR_DEST";
+          session.lastService = "tours";
+          await sendWhatsApp(
+            from,
+            "Awesome! 🎟\nWhich *city or destination* are you interested in for tours?\n\nExample: *Nairobi*, *Diani*, *Dubai*"
+          );
+        } else if (text === "2") {
+          session.state = "ASK_HOTEL_DEST";
+          session.lastService = "hotels";
+          await sendWhatsApp(
+            from,
+            "Great! 🏨\nWhich *city or area* do you want to stay in?\n\nExample: *Nairobi CBD*, *Westlands*, *Diani Beach*"
+          );
+        } else if (text === "3") {
+          session.state = "ASK_FLIGHT_ROUTE";
+          session.lastService = "flights";
+          await sendWhatsApp(
+            from,
+            "✈️ Nice!\nPlease type your route in this format:\n\n*From City → To City*\nExample: *Nairobi → Cape Town*"
+          );
+        } else if (text === "4") {
+          session.state = "ASK_TRAVEL_QUESTION";
+          await sendWhatsApp(
+            from,
+            "Sure! ✨\nAsk me anything about *Kenya, East Africa, or trip planning* and I’ll do my best to help."
+          );
+        } else if (text === "5") {
+          // CUSTOM ITINERARY FLOW (paid)
+          session.state = "ASK_ITINERARY_DETAILS";
+          await sendWhatsApp(
+            from,
+            "Amazing! 🧳\nLet’s get some details so I can prepare a *custom itinerary* (from *$5*).\n\n" +
+              "Please reply in this format:\n" +
+              "*Destination(s)*:\n" +
+              "*Number of days*:\n" +
+              "*Rough budget* (low / mid / luxury):\n" +
+              "*Travel month*:"
+          );
+        } else if (text === "6") {
+          // TRIP INSPIRATION (free)
+          session.state = "ASK_TRIP_INSPIRATION";
+          await sendWhatsApp(
+            from,
+            "Love it! 🌍✨\nTell me a bit about what you’re dreaming of.\n\n" +
+              "You can reply in *one message* like this:\n" +
+              "*From*: (your country or city)\n" +
+              "*Where to*: (region or “surprise me”)\n" +
+              "*Number of days*:\n" +
+              "*Budget*: low / mid / luxury\n" +
+              "*Who*: solo / couple / family / friends\n" +
+              "*Travel month*:\n\n" +
+              "Example:\n" +
+              "“From Nairobi, 4–5 days, mid-budget, for a couple, somewhere beachy in April.”"
+          );
+        } else {
+          await sendWhatsApp(
+            from,
+            "Sorry, I didn’t understand that.\n\n" + mainMenuText()
+          );
+        }
 
-  break;
-}
-
+        break;
+      }
 
       case "ASK_TOUR_DEST": {
         const dest = body;
@@ -849,44 +996,39 @@ app.post("/webhook", async (req, res) => {
       }
 
       case "ASK_TRIP_INSPIRATION": {
-  const prefs = body; // user’s description
+        const prefs = body; // user’s description
 
-  const ideas = await generateTripInspiration(prefs, from);
+        const ideas = await generateTripInspiration(prefs, from);
 
-  await sendWhatsApp(
-    from,
-    "🌍 *Trip inspiration for you*\n\n" +
-      ideas +
-      "\n\nIf you’d like me to turn one of these into a *day-by-day custom itinerary* with links, " +
-      "reply with *5* to start the paid itinerary flow, or type *MENU* to go back."
-  );
+        await sendWhatsApp(
+          from,
+          "🌍 *Trip inspiration for you*\n\n" +
+            ideas +
+            "\n\nIf you’d like me to turn one of these into a *day-by-day custom itinerary* with links, " +
+            "reply with *5* to start the paid itinerary flow, or type *MENU* to go back."
+        );
 
-  // After sending ideas, go back to MAIN_MENU
-  session.state = "MAIN_MENU";
-  break;
-}
-
+        // After sending ideas, go back to MAIN_MENU
+        session.state = "MAIN_MENU";
+        break;
+      }
 
       case "ASK_TRAVEL_QUESTION": {
-  // User just sent a free-form question like:
-  // "What's the current weather like in Nyeri?"
-  const question = body;
+        const question = body;
 
-  // Call AI helper
-  const answer = await generateTravelAnswer(question, from);
+        const answer = await generateTravelAnswer(question, from);
 
-  await sendWhatsApp(
-    from,
-    "🧭 *Travel Q&A*\n\n" +
-      `*Your question:*\n${question}\n\n` +
-      `*My answer:*\n${answer}\n\n` +
-      "You can ask another question, or type *MENU* to go back."
-  );
+        await sendWhatsApp(
+          from,
+          "🧭 *Travel Q&A*\n\n" +
+            `*Your question:*\n${question}\n\n` +
+            `*My answer:*\n${answer}\n\n` +
+            "You can ask another question, or type *MENU* to go back."
+        );
 
-  // Stay in ASK_TRAVEL_QUESTION so they can continue the mini-conversation
-  break;
-}
-
+        // Stay in ASK_TRAVEL_QUESTION so they can continue the mini-conversation
+        break;
+      }
 
       case "AFTER_LINKS": {
         if (text === "yes" || text === "y") {
@@ -976,97 +1118,99 @@ app.post("/webhook", async (req, res) => {
       }
 
       case "EDIT_ITINERARY_DETAILS": {
-        const editRequest = body; // user’s updated trip details / changes
-
-        // 1) Get latest PAID & editable itinerary
-        const { rows } = await db.query(
-          `SELECT id, last_destination, raw_details, editable_until
-           FROM itinerary_requests
-           WHERE whatsapp_number = $1
-             AND payment_status = 'paid'
-             AND editable_until IS NOT NULL
-             AND editable_until > NOW()
-           ORDER BY created_at DESC
-           LIMIT 1`,
-          [from]
-        );
-
-        if (rows.length === 0) {
-          await sendWhatsApp(
-            from,
-            "Sorry, I couldn’t find an itinerary that is still within your 3-day edit window. " +
-              "If you’d like a new one, please choose option *5* from the MENU."
-          );
-          session.state = "MAIN_MENU";
-          break;
-        }
-
-        const current = rows[0];
-        const dest = current.last_destination || "your trip";
-
-        // 2) Build a richer "context" for AI: previous details + requested changes
-        const aiDetails =
-          `Original request details:\n${current.raw_details || "N/A"}\n\n` +
-          `User requested changes:\n${editRequest}`;
-
-        // 3) Generate updated itinerary text with AI
-        const updatedText = await generateItineraryText(dest, aiDetails);
-
-        // 4) Save updated raw_details + itinerary_text back to DB
-        await db.query(
-          `UPDATE itinerary_requests
-           SET raw_details = $1,
-               itinerary_text = $2
-           WHERE id = $3`,
-          [editRequest, updatedText, current.id]
-        );
+        const editRequest = body;
 
         try {
-          // 5) Regenerate PDF and overwrite the previous one in S3
-          const pdfTitle = `Updated itinerary for ${dest}`;
-          const pdfBuffer = await generateItineraryPdfBuffer(
-            updatedText,
-            pdfTitle
+          const r = await db.query(
+            `SELECT id, itinerary_text, last_destination
+             FROM itinerary_requests
+             WHERE whatsapp_number = $1
+               AND payment_status = 'paid'
+               AND NOW() <= editable_until
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [from]
           );
 
-          const pdfUrl = await uploadItineraryPdfToS3(
-            pdfBuffer,
-            `itinerary_${current.id}` // same key => overwrite old PDF
-          );
-
-          await db.query(
-            `UPDATE itinerary_requests
-             SET itinerary_pdf_url = $1
-             WHERE id = $2`,
-            [pdfUrl, current.id]
-          );
-
-          // 6) Send short WhatsApp message + updated PDF
-          const shortMsg =
-            "Here is your *updated itinerary* as a PDF. 📄\n\n" +
-            "You can still request more edits within your 3-day window by sending *EDIT ITINERARY* again.";
-
-          await sendWhatsAppMedia(from, shortMsg, pdfUrl);
-        } catch (err) {
-          console.error(
-            "Error sending updated itinerary PDF, falling back to text:",
-            err
-          );
-
-          // 7) Fallback: send as TEXT but enforce Twilio 1600-char limit
-          let msg =
-            "Here is your *updated itinerary*:\n\n" +
-            updatedText +
-            "\n\nYou can still request more edits within your 3-day window by sending *EDIT ITINERARY* again.";
-
-          if (msg.length > 1500) {
-            msg = msg.slice(0, 1500) + "\n\n(Shortened to fit WhatsApp limits.)";
+          if (r.rowCount === 0) {
+            await sendWhatsApp(
+              from,
+              "Sorry, I couldn't find an editable itinerary for you."
+            );
+            session.state = "MAIN_MENU";
+            break;
           }
 
-          await sendWhatsApp(from, msg);
+          const current = r.rows[0];
+          const originalItineraryText = current.itinerary_text || "";
+          const keyCities = current.last_destination
+            ? [current.last_destination]
+            : [];
+
+          const updatedText = await generateUpdatedItineraryText({
+            originalItineraryText,
+            userEditRequest: editRequest,
+            keyCities,
+          });
+
+          await db.query(
+            "UPDATE itinerary_requests SET itinerary_text = $1, raw_details = $2 WHERE id = $3",
+            [updatedText, editRequest, current.id]
+          );
+
+          try {
+            const dest = current.last_destination || "your trip";
+            const pdfTitle = `Updated itinerary for ${dest}`;
+            const pdfBuffer = await generateItineraryPdfBuffer(
+              updatedText,
+              pdfTitle
+            );
+
+            const pdfUrl = await uploadItineraryPdfToS3(
+              pdfBuffer,
+              `itinerary_${current.id}` // same key => overwrite old PDF
+            );
+
+            await db.query(
+              `UPDATE itinerary_requests
+               SET itinerary_pdf_url = $1
+               WHERE id = $2`,
+              [pdfUrl, current.id]
+            );
+
+            const shortMsg =
+              "Here is your *updated itinerary* as a PDF. 📄\n\n" +
+              "You can still request more edits within your 3-day window by sending *EDIT ITINERARY* again.";
+
+            await sendWhatsAppMedia(from, shortMsg, pdfUrl);
+          } catch (err) {
+            console.error(
+              "Error sending updated itinerary PDF, falling back to text:",
+              err
+            );
+
+            let msg =
+              "Here is your *updated itinerary*:\n\n" +
+              updatedText +
+              "\n\nYou can still request more edits within your 3-day window by sending *EDIT ITINERARY* again.";
+
+            if (msg.length > 1500) {
+              msg = msg.slice(0, 1500) + "\n\n(Shortened to fit WhatsApp limits.)";
+            }
+
+            await sendWhatsApp(from, msg);
+          }
+
+          session.state = "MAIN_MENU";
+        } catch (err) {
+          console.error("Error updating itinerary:", err);
+          await sendWhatsApp(
+            from,
+            "Sorry, I hit a problem while updating your itinerary. Please try again shortly or type *MENU* to go back."
+          );
+          session.state = "MAIN_MENU";
         }
 
-        session.state = "MAIN_MENU";
         break;
       }
 
