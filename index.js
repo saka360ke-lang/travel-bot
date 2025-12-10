@@ -57,9 +57,11 @@ const db = new Pool({
   connectionString: DATABASE_URL,
 });
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// After `const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });`
+
+const OPENAI_MODEL =
+  process.env.OPENAI_MODEL || "gpt-4.1-mini"; // or "gpt-4o-mini" – use the same one you're using in the working Q&A code
+
 
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
@@ -429,12 +431,13 @@ Now, using the information above, write the full itinerary.
   `.trim();
 
   const response = await openai.responses.create({
-    model: "gpt-5.1-mini",
-    input: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-  });
+  model: OPENAI_MODEL,
+  input: [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt },
+  ],
+});
+
 
   const text = response.output[0].content[0].text;
   return text;
@@ -507,12 +510,12 @@ Now rewrite the itinerary accordingly.
   `.trim();
 
   const response = await openai.responses.create({
-    model: "gpt-5.1-mini",
-    input: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-  });
+  model: OPENAI_MODEL,
+  input: [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt },
+  ],
+});
 
   const text = response.output[0].content[0].text;
   return text;
