@@ -839,66 +839,94 @@ app.post("/webhook", async (req, res) => {
       }
 
       case "EDIT_ITINERARY_DETAILS": {
-        const newDetails = body;
-        session.itineraryDetails = newDetails;
+  const editRequest = body; // user’s new message describing changes
 
-        if (!session.currentItineraryId) {
-          await sendWhatsApp(
-            from,
-            "I lost track of which itinerary to edit 😅. Please type *ITINERARY* to view your latest plan, or choose *5* from the menu to start a new one."
-          );
-          session.state = "MAIN_MENU";
-          break;
-        }
+  // 1) Find the latest PAID, still-editable itinerary for this WhatsApp number
+  const { rows } = await db.query(
+    `SELECT id, last_destination, raw_details, editable_until
+       FROM itinerary_requests
+      WHERE whatsapp_number = $1
+        AND payment_status = 'paid'
+        AND editable_until IS NOT NULL
+        AND editable_until > NOW()
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [from]
+  );
 
-        try {
-          const r = await db.query(
-            `SELECT id, last_destination
-             FROM itinerary_requests
-             WHERE id = $1
-               AND whatsapp_number = $2
-               AND payment_status = 'paid'`,
-            [session.currentItineraryId, from]
-          );
+  if (rows.length === 0) {
+    await sendWhatsApp(
+      from,
+      "Sorry, I couldn’t find an itinerary that is still within the 3-day edit window. " +
+        "If you’d like a new one, please choose option *5* from the MENU."
+    );
+    session.state = "MAIN_MENU";
+    break;
+  }
 
-          if (r.rowCount === 0) {
-            await sendWhatsApp(
-              from,
-              "I couldn’t find that itinerary anymore. Please choose *5* from the main menu to start a new one."
-            );
-            session.state = "MAIN_MENU";
-            break;
-          }
+  const current = rows[0];
+  const dest = current.last_destination || "your trip";
 
-          const row = r.rows[0];
-          const dest = row.last_destination || "your trip";
-          const newText = await generateItineraryText(dest, newDetails);
+  // 2) Build a richer "context" for AI: previous details + requested changes
+  const aiDetails =
+    `Original request details:\n${current.raw_details || "N/A"}\n\n` +
+    `User requested changes:\n${editRequest}`;
 
-          await db.query(
-            `UPDATE itinerary_requests
-             SET raw_details = $1,
-                 itinerary_text = $2
-             WHERE id = $3`,
-            [newDetails, newText, row.id]
-          );
+  // 3) Generate updated itinerary text with AI
+  const updatedText = await generateItineraryText(dest, aiDetails);
 
-          await sendWhatsApp(
-            from,
-            "Here is your *updated itinerary*:\n\n" +
-              newText +
-              "\n\nYou can still request more edits within your 3-day window by sending *EDIT ITINERARY* again."
-          );
-        } catch (err) {
-          console.error("Error updating itinerary:", err);
-          await sendWhatsApp(
-            from,
-            "Sorry, something went wrong while updating your itinerary. Please try again."
-          );
-        }
+  // 4) Save updated raw_details + itinerary_text back to DB
+  await db.query(
+    `UPDATE itinerary_requests
+       SET raw_details = $1,
+           itinerary_text = $2
+     WHERE id = $3`,
+    [editRequest, updatedText, current.id]
+  );
 
-        session.state = "MAIN_MENU";
-        break;
-      }
+  try {
+    // 5) Regenerate PDF and overwrite the previous one in S3
+    const pdfTitle = `Updated itinerary for ${dest}`;
+    const pdfBuffer = await generateItineraryPdfBuffer(updatedText, pdfTitle);
+
+    const pdfUrl = await uploadItineraryPdfToS3(
+      pdfBuffer,
+      `itinerary_${current.id}` // same key => overwrite old PDF
+    );
+
+    await db.query(
+      `UPDATE itinerary_requests
+         SET itinerary_pdf_url = $1
+       WHERE id = $2`,
+      [pdfUrl, current.id]
+    );
+
+    // 6) Send short WhatsApp message + updated PDF
+    const shortMsg =
+      "Here is your *updated itinerary* as a PDF. 📄\n\n" +
+      "You can still request more edits within your 3-day window by sending *EDIT ITINERARY* again.";
+
+    await sendWhatsAppMedia(from, shortMsg, pdfUrl);
+  } catch (err) {
+    console.error("Error sending updated itinerary PDF, falling back to text:", err);
+
+    // 7) Fallback: send as TEXT but enforce Twilio 1600-char limit
+    let msg =
+      "Here is your *updated itinerary*:\n\n" +
+      updatedText +
+      "\n\nYou can still request more edits within your 3-day window by sending *EDIT ITINERARY* again.";
+
+    if (msg.length > 1500) {
+      msg = msg.slice(0, 1500) + "\n\n(Shortened to fit WhatsApp limits.)";
+    }
+
+    await sendWhatsApp(from, msg);
+  }
+
+  session.state = "MAIN_MENU";
+  break;
+}
+
 
       default: {
         session.state = "MAIN_MENU";
