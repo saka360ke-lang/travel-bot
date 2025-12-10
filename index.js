@@ -277,6 +277,84 @@ function extractDaysFromDetails(details) {
   return null;
 }
 
+// Extract likely city/region keywords from the request – for now, simple heuristics:
+function extractCitiesFromText(text) {
+  // Very simple approach: you can improve later
+  const candidates = ["Sydney", "Melbourne", "Cairns", "Brisbane", "Perth", "Adelaide", "Darwin", "Hobart"];
+  const found = [];
+  const lower = text.toLowerCase();
+
+  for (const city of candidates) {
+    if (lower.includes(city.toLowerCase())) {
+      found.push(city);
+    }
+  }
+
+  // Always at least include one city if the text has “Sydney” etc.
+  return [...new Set(found)];
+}
+
+async function handlePaidItinerary(itineraryRow) {
+  const userRequestText = itineraryRow.raw_details || itineraryRow.last_destination || "";
+
+  // 1) Get cities found in the text
+  const cities = extractCitiesFromText(userRequestText);
+
+  // 2) Build a small affiliate-link block string to feed the model
+  let viatorLinkBlock = "";
+  for (const city of cities) {
+    const links = buildTourLinks(city);
+    viatorLinkBlock += `
+[${city} core tours]( ${links.core} )
+[${city} recommended tours]( ${links.recommended} )
+`;
+  }
+
+  // 3) Generate itinerary text with links
+  const itineraryText = await generateItineraryText(userRequestText, viatorLinkBlock);
+
+  // 4) Convert to PDF + upload to S3 (your existing code)
+  // ...
+}
+
+async function handleItineraryUpdate(latestRow, updatedText) {
+  const originalRequestText = latestRow.raw_details || latestRow.last_destination || "";
+  const cities = extractCitiesFromText(updatedText || originalRequestText);
+
+  let viatorLinkBlock = "";
+  for (const city of cities) {
+    const links = buildTourLinks(city);
+    viatorLinkBlock += `
+[${city} core tours]( ${links.core} )
+[${city} recommended tours]( ${links.recommended} )
+`;
+  }
+
+  const itineraryText = await generateUpdatedItineraryText(
+    originalRequestText,
+    updatedText,
+    viatorLinkBlock // if you want to also pass this in
+  );
+
+  // then PDF + S3 + Twilio
+}
+
+async function generateUpdatedItineraryText(originalRequestText, updatedRequestText, viatorLinkBlock) {
+  const userPrompt = `
+Original request:
+${originalRequestText}
+
+Updated request:
+${updatedRequestText}
+
+Here is a block of Viator affiliate links you can suggest in the plan:
+${viatorLinkBlock}
+
+[rest of prompt...]
+`;
+  // ...
+}
+
 // Fallback template if AI fails
 function generateItineraryFallback(destination, details) {
   const days = extractDaysFromDetails(details) || 5; // default 5 days
@@ -349,102 +427,40 @@ async function generateTravelAnswer(question, from) {
 }
 
 // AI-powered full itinerary generation
-async function generateItineraryText({ tripRequestText, keyCities }) {
-  const viatorLinksBlock = buildViatorLinksBlock(keyCities);
-
+async function generateItineraryText(userRequestText, viatorLinkBlock) {
   const systemPrompt = `
-You are a professional travel planner helping Hugu Adventures design detailed, friendly, and realistic trip itineraries.
+You are Hugu Adventures' trip designer. You write polished, friendly, professional travel itineraries for WhatsApp users.
 
-Your job:
-- Turn the user's short trip request into a *full, day-by-day itinerary*.
-- Write in a *happy, warm, and helpful* tone that feels human and welcoming, but still clear and structured.
-- Assume the traveller is booking via Hugu Adventures and Viator affiliate links.
-  `.trim();
+[... same style rules as above ...]
+`;
 
   const userPrompt = `
-Create a detailed, professional itinerary document based on the trip request and affiliate links below.
+The user has paid for a custom itinerary.
 
-TRIP REQUEST (from traveller):
-"""
-${tripRequestText}
-"""
+User request:
+${userRequestText}
 
-KEY DESTINATIONS & VIATOR AFFILIATE LINKS (Markdown):
-${viatorLinksBlock}
+You are also given a block of Viator affiliate links that you may use for daily activity suggestions. They look like this, for different cities or themes:
 
-REQUIREMENTS FOR THE ITINERARY FORMAT:
+${viatorLinkBlock}
 
-1) OVERALL STRUCTURE
-- Start with a clear title line like:
-  **__Trip Title: 24-Day Australia Road & Coast Adventure (Sydney, Coast & Reef)__**
-- Then a short paragraph-style *Trip Overview* summarising:
-  - Starting point
-  - Trip style (solo / couple / family, road trip vs city-hopping, etc.)
-  - Duration (x days / y nights)
-  - Budget level (low / mid / luxury)
-  - Who it's ideal for
+Use these links where relevant in the itinerary as:
+[Book Tour Here](VIATOR_URL)
 
-2) DAILY FORMAT
-For each day, use this structure:
-
-### __Day X: Short Day Name__
-- On the next line, show **approx travel** for any major move:
-  - Example: **Approx travel:** Sydney → Blue Mountains – ~110 km • 1.5–2 hrs by road
-  - If it is a local city day with no long transfers, you can write things like:
-    **Approx travel:** Local walking + short public transport
-
-Then break the day into sections like this:
-
-**Morning**
-- Bullet points for morning activities
-
-**Afternoon**
-- Bullet points for afternoon activities
-
-**Evening**
-- Bullet points for evening / night activities
-
-3) DRIVING / FLIGHT TIME & DISTANCE
-- Whenever the traveller is going from one city/region to another, include a realistic *approximate* distance and driving or flight time.
-- Use kilometers and hours, like:
-  - "~250 km • 3–3.5 hrs by road"
-  - "Flight ~3 hrs (plus airport time)"
-
-4) ACTIVITY RECOMMENDATIONS WITH AFFILIATE LINKS
-- For each day where activities or tours make sense, include a short section:
-  **Suggested activities:**
-  - Use 1–3 bullet points.
-  - Re-use the Markdown affiliate links from the list above; do NOT invent new URLs.
-  - When there is a relevant destination in the day that matches one of the key cities, use that city’s link in a bullet like:
-    - Sydney city tour – [Book Tour Here](SOME_URL)
-    - Great Barrier Reef day cruise – [Book Tour Here](SOME_URL)
-- You are *allowed* to copy the same \`[Book Tour Here](...)\` link multiple times across the itinerary whenever it's relevant.
-
-5) TONE
-- Write like a friendly, knowledgeable travel consultant.
-- Make the trip feel exciting and reassuring.
-- Avoid sounding like a robot or like you are listing raw facts only.
-- Keep it realistic for a low/mid/luxury budget based on the traveller’s request.
-
-6) FINAL TOUCH
-- End with a short, warm closing paragraph, for example:
-  - A reminder they can request edits.
-  - A suggestion that Hugu Adventures can help fine-tune hotels, transfers, and tours.
-
-Now, using the information above, write the full itinerary.
-  `.trim();
+Now write a complete day-by-day itinerary following the formatting and tone rules.
+`;
 
   const response = await openai.responses.create({
-  model: OPENAI_MODEL,
-  input: [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: userPrompt },
-  ],
-});
+    model: OPENAI_MODEL,
+    input: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+  });
 
-
-  const text = response.output[0].content[0].text;
-  return text;
+  const output =
+    response.output?.[0]?.content?.[0]?.text || "Sorry, I could not generate an itinerary.";
+  return output;
 }
 
 async function generateUpdatedItineraryText(originalRequestText, updatedRequestText) {
