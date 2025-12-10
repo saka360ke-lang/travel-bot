@@ -734,13 +734,30 @@ app.post("/webhook", async (req, res) => {
         break;
       }
 
-      case "MAIN_MENU": {
+     case "MAIN_MENU": {
+  console.log("STATE MAIN_MENU, user choice:", text);
+
   if (text === "1") {
-    // ... existing tours logic ...
+    session.state = "ASK_TOUR_DEST";
+    session.lastService = "tours";
+    await sendWhatsApp(
+      from,
+      "Awesome! 🎟\nWhich *city or destination* are you interested in for tours?\n\nExample: *Nairobi*, *Diani*, *Dubai*"
+    );
   } else if (text === "2") {
-    // ... existing hotels logic ...
+    session.state = "ASK_HOTEL_DEST";
+    session.lastService = "hotels";
+    await sendWhatsApp(
+      from,
+      "Great! 🏨\nWhich *city or area* do you want to stay in?\n\nExample: *Nairobi CBD*, *Westlands*, *Diani Beach*"
+    );
   } else if (text === "3") {
-    // ... existing flights logic ...
+    session.state = "ASK_FLIGHT_ROUTE";
+    session.lastService = "flights";
+    await sendWhatsApp(
+      from,
+      "✈️ Nice!\nPlease type your route in this format:\n\n*From City → To City*\nExample: *Nairobi → Cape Town*"
+    );
   } else if (text === "4") {
     session.state = "ASK_TRAVEL_QUESTION";
     await sendWhatsApp(
@@ -748,9 +765,19 @@ app.post("/webhook", async (req, res) => {
       "Sure! ✨\nAsk me anything about *Kenya, East Africa, or trip planning* and I’ll do my best to help."
     );
   } else if (text === "5") {
-    // ... existing custom itinerary logic ...
+    // CUSTOM ITINERARY FLOW (paid)
+    session.state = "ASK_ITINERARY_DETAILS";
+    await sendWhatsApp(
+      from,
+      "Amazing! 🧳\nLet’s get some details so I can prepare a *custom itinerary* (from *$5*).\n\n" +
+        "Please reply in this format:\n" +
+        "*Destination(s)*:\n" +
+        "*Number of days*:\n" +
+        "*Rough budget* (low / mid / luxury):\n" +
+        "*Travel month*:"
+    );
   } else if (text === "6") {
-    // NEW: Trip inspiration entry
+    // TRIP INSPIRATION (free)
     session.state = "ASK_TRIP_INSPIRATION";
     await sendWhatsApp(
       from,
@@ -771,24 +798,7 @@ app.post("/webhook", async (req, res) => {
       "Sorry, I didn’t understand that.\n\n" + mainMenuText()
     );
   }
-  break;
-}
 
-    case "ASK_TRIP_INSPIRATION": {
-  const prefs = body; // whatever the user typed as their dream trip
-
-  const ideas = await generateTripInspiration(prefs, from);
-
-  await sendWhatsApp(
-    from,
-    "🌍 *Trip inspiration for you*\n\n" +
-      ideas +
-      "\n\nIf you’d like me to turn one of these into a *day-by-day custom itinerary* with links, " +
-      "reply with *5* to start the paid itinerary flow, or type *MENU* to go back."
-  );
-
-  // After sending ideas, go back to MAIN_MENU (simpler UX)
-  session.state = "MAIN_MENU";
   break;
 }
 
@@ -837,6 +847,25 @@ app.post("/webhook", async (req, res) => {
         session.state = "AFTER_LINKS";
         break;
       }
+
+      case "ASK_TRIP_INSPIRATION": {
+  const prefs = body; // user’s description
+
+  const ideas = await generateTripInspiration(prefs, from);
+
+  await sendWhatsApp(
+    from,
+    "🌍 *Trip inspiration for you*\n\n" +
+      ideas +
+      "\n\nIf you’d like me to turn one of these into a *day-by-day custom itinerary* with links, " +
+      "reply with *5* to start the paid itinerary flow, or type *MENU* to go back."
+  );
+
+  // After sending ideas, go back to MAIN_MENU
+  session.state = "MAIN_MENU";
+  break;
+}
+
 
       case "ASK_TRAVEL_QUESTION": {
   // User just sent a free-form question like:
