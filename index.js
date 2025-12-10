@@ -2,7 +2,6 @@
 // Hugu Adventures – Travel Assistant (Flow 1 + affiliate link helpers + DB save)
 
 require("dotenv").config();
-const app = express();
 const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
@@ -12,11 +11,11 @@ const { Pool } = require("pg");
 const PDFDocument = require("pdfkit");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 
-const OpenAI = require("openai");
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+const app = express();
 // Twilio sends x-www-form-urlencoded by default
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
@@ -65,7 +64,6 @@ const db = new Pool({
 
 const OPENAI_MODEL =
   process.env.OPENAI_MODEL || "gpt-4.1-mini"; // or "gpt-4o-mini" – use the same one you're using in the working Q&A code
-
 
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
@@ -280,7 +278,16 @@ function extractDaysFromDetails(details) {
 // Extract likely city/region keywords from the request – for now, simple heuristics:
 function extractCitiesFromText(text) {
   // Very simple approach: you can improve later
-  const candidates = ["Sydney", "Melbourne", "Cairns", "Brisbane", "Perth", "Adelaide", "Darwin", "Hobart"];
+  const candidates = [
+    "Sydney",
+    "Melbourne",
+    "Cairns",
+    "Brisbane",
+    "Perth",
+    "Adelaide",
+    "Darwin",
+    "Hobart",
+  ];
   const found = [];
   const lower = text.toLowerCase();
 
@@ -295,7 +302,8 @@ function extractCitiesFromText(text) {
 }
 
 async function handlePaidItinerary(itineraryRow) {
-  const userRequestText = itineraryRow.raw_details || itineraryRow.last_destination || "";
+  const userRequestText =
+    itineraryRow.raw_details || itineraryRow.last_destination || "";
 
   // 1) Get cities found in the text
   const cities = extractCitiesFromText(userRequestText);
@@ -311,14 +319,18 @@ async function handlePaidItinerary(itineraryRow) {
   }
 
   // 3) Generate itinerary text with links
-  const itineraryText = await generateItineraryText(userRequestText, viatorLinkBlock);
+  const itineraryText = await generateItineraryText(
+    userRequestText,
+    viatorLinkBlock
+  );
 
   // 4) Convert to PDF + upload to S3 (your existing code)
   // ...
 }
 
 async function handleItineraryUpdate(latestRow, updatedText) {
-  const originalRequestText = latestRow.raw_details || latestRow.last_destination || "";
+  const originalRequestText =
+    latestRow.raw_details || latestRow.last_destination || "";
   const cities = extractCitiesFromText(updatedText || originalRequestText);
 
   let viatorLinkBlock = "";
@@ -339,7 +351,11 @@ async function handleItineraryUpdate(latestRow, updatedText) {
   // then PDF + S3 + Twilio
 }
 
-async function generateUpdatedItineraryText(originalRequestText, updatedRequestText, viatorLinkBlock) {
+async function generateUpdatedItineraryText(
+  originalRequestText,
+  updatedRequestText,
+  viatorLinkBlock
+) {
   const userPrompt = `
 Original request:
 ${originalRequestText}
@@ -369,8 +385,7 @@ function generateItineraryFallback(destination, details) {
     } else {
       out +=
         "• Morning: Flexible activity (city tour, safari, beach time, or cultural visit).\n";
-      out +=
-        "• Afternoon: Another activity or free time.\n";
+      out += "• Afternoon: Another activity or free time.\n";
       out +=
         "• Evening: Dinner at a recommended local spot or at your lodge.\n\n";
     }
@@ -459,11 +474,15 @@ Now write a complete day-by-day itinerary following the formatting and tone rule
   });
 
   const output =
-    response.output?.[0]?.content?.[0]?.text || "Sorry, I could not generate an itinerary.";
+    response.output?.[0]?.content?.[0]?.text ||
+    "Sorry, I could not generate an itinerary.";
   return output;
 }
 
-async function generateUpdatedItineraryText(originalRequestText, updatedRequestText) {
+async function generateUpdatedItineraryText(
+  originalRequestText,
+  updatedRequestText
+) {
   const systemPrompt = `
 You are Hugu Adventures' trip designer. You write polished, friendly, professional travel itineraries for WhatsApp users.
 
@@ -518,7 +537,8 @@ Formatting rules:
   });
 
   const output =
-    response.output?.[0]?.content?.[0]?.text || "Sorry, I could not generate an itinerary.";
+    response.output?.[0]?.content?.[0]?.text ||
+    "Sorry, I could not generate an itinerary.";
   return output;
 }
 
@@ -1199,7 +1219,8 @@ app.post("/webhook", async (req, res) => {
               "\n\nYou can still request more edits within your 3-day window by sending *EDIT ITINERARY* again.";
 
             if (msg.length > 1500) {
-              msg = msg.slice(0, 1500) + "\n\n(Shortened to fit WhatsApp limits.)";
+              msg =
+                msg.slice(0, 1500) + "\n\n(Shortened to fit WhatsApp limits.)";
             }
 
             await sendWhatsApp(from, msg);
