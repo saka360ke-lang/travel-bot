@@ -2,6 +2,7 @@
 // Hugu Adventures – Travel Assistant (Flow 1 + affiliate link helpers + DB save)
 
 require("dotenv").config();
+const app = express();
 const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
@@ -11,7 +12,10 @@ const { Pool } = require("pg");
 const PDFDocument = require("pdfkit");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 
-const app = express();
+const OpenAI = require("openai");
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // Twilio sends x-www-form-urlencoded by default
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -57,7 +61,7 @@ const db = new Pool({
   connectionString: DATABASE_URL,
 });
 
-// After `const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });`
+// After `const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY }); //
 
 const OPENAI_MODEL =
   process.env.OPENAI_MODEL || "gpt-4.1-mini"; // or "gpt-4o-mini" – use the same one you're using in the working Q&A code
