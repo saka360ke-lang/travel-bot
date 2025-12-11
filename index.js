@@ -60,10 +60,9 @@ const db = new Pool({
   connectionString: DATABASE_URL,
 });
 
-// After `const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY }); //
-
 const OPENAI_MODEL =
-  process.env.OPENAI_MODEL || "gpt-4.1-mini"; // or "gpt-4o-mini" – use the same one you're using in the working Q&A code
+  process.env.OPENAI_MODEL || "gpt-4.1-mini"; // or "gpt-4o-mini"
+const ITINERARY_MODEL = process.env.ITINERARY_MODEL || "gpt-4.1-mini";
 
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
@@ -205,6 +204,113 @@ function buildTourLinks(destination) {
   return [link1, link2];
 }
 
+// ===== ITINERARY PROMPT TEMPLATE =====
+
+function buildItineraryPrompt({
+  mode, // "new" or "update"
+  tripDetails,
+  previousItineraryText,
+  editRequestText,
+  viatorLinksByCity,
+}) {
+  const viatorLinksJson = JSON.stringify(viatorLinksByCity || {}, null, 2);
+
+  return `
+You are a professional travel planner for Hugu Adventures, creating friendly, clear, and practical itineraries that will be exported directly to PDF.
+
+USER TRIP REQUEST:
+"""${tripDetails}"""
+
+VIATOR ACTIVITY LINKS (JSON OBJECT):
+${viatorLinksJson}
+
+${
+  mode === "update"
+    ? `PREVIOUS ITINERARY (TEXT VERSION):
+"""${previousItineraryText || ""}"""
+
+TRAVELLER'S CHANGE REQUEST:
+"""${editRequestText || ""}"""
+`
+    : ""
+}
+
+YOUR TASK:
+
+1. If this is a *new* itinerary, create a full, day–by–day itinerary *from scratch* based ONLY on the user's trip request and the Viator links provided.
+2. If this is an *update*, first understand the previous itinerary and the user's requested changes. Then create a **new updated itinerary** that:
+   - Respects the new request.
+   - Keeps good parts of the original where appropriate.
+   - Clearly reflects the new cities, style, budget and trip length.
+
+FORMATTING RULES (IMPORTANT – THIS GOES STRAIGHT TO PDF):
+- Write as plain text (no Markdown lists, no bullet characters like • that might break).
+- Use this style for the main title:
+  **__TRIP TITLE GOES HERE__**
+- For each day, use:
+  Day X: Short day title
+- Put a blank line between paragraphs and days.
+- Tone: happy, helpful, and reassuring – like a friendly, expert planner.
+
+CONTENT RULES:
+
+A) STRUCTURE
+- Start with a short 2–3 line overview of the whole trip.
+- Then list days in order: Day 1, Day 2, Day 3, etc.
+- Ensure the total number of days matches the user's request (for example, 24 days means Day 1 to Day 24).
+
+B) TRANSPORT & DISTANCES
+For any move between cities or major stops:
+- Specify whether the segment is by *road* or *flight* (follow the user’s request – e.g. “transport by road”).
+- Include approximate:
+  - Driving distance in km and driving time in hours (for road segments).
+  - Flight duration and typical route (e.g. “about 3 hours, direct flight”).
+- Example line:
+  Travel: Sydney → Blue Mountains (approx. 110 km, 2–2.5 hours by road).
+
+Use reasonable approximations; they do not need to be perfect, but must be realistic.
+
+C) DAILY DETAIL
+For each day:
+- Morning: brief but vivid description of what the traveller does.
+- Afternoon: more activities or movement to the next place.
+- Evening: suggestions for relaxed enjoyment (walks, viewpoints, cafes, local food, etc.).
+- Ensure the plan matches the requested:
+  - Budget level (low / mid / luxury).
+  - Style (solo / couple / family / friends).
+  - Region / country.
+
+D) VIATOR ACTIVITY LINKS — [Book Tour Here]
+- You are given a JSON object of Viator links in the format:
+  {
+    "Sydney": {
+      "search_url": "...",
+      "recommended_url": "..."
+    },
+    "Melbourne": {
+      "search_url": "...",
+      "recommended_url": "..."
+    }
+  }
+- When you recommend an activity in a city that exists in this JSON:
+  - After describing the activity, add a line like:
+    [Book Tour Here] SYDNEY: https://...
+  - Prefer the "recommended_url" for that city where available.
+- If the city is not in the JSON:
+  - Use the closest relevant city key you see in the JSON (e.g. use "Australia" or "Sydney" links for nearby areas).
+- Include *at least one* [Book Tour Here] line on **every day** that has activities.
+
+E) FINAL TONE
+- Make the trip sound exciting but achievable on the specified budget.
+- Emphasise variety: culture, nature, local food, unique experiences.
+- Do not mention that this text will become a PDF.
+- Do not talk about yourself as an AI; just be the planner.
+
+OUTPUT:
+Return ONLY the final itinerary text in the required format. Do NOT include explanations, notes to the developer, or JSON.
+`;
+}
+
 function buildViatorLinksBlock(keyCities) {
   if (!keyCities || keyCities.length === 0) return "None.";
 
@@ -301,74 +407,30 @@ function extractCitiesFromText(text) {
   return [...new Set(found)];
 }
 
+// (Legacy helper – not used in webhooks but kept for future use)
 async function handlePaidItinerary(itineraryRow) {
   const userRequestText =
     itineraryRow.raw_details || itineraryRow.last_destination || "";
 
-  // 1) Get cities found in the text
   const cities = extractCitiesFromText(userRequestText);
-
-  // 2) Build a small affiliate-link block string to feed the model
-  let viatorLinkBlock = "";
-  for (const city of cities) {
-    const links = buildTourLinks(city);
-    viatorLinkBlock += `
-[${city} core tours]( ${links.core} )
-[${city} recommended tours]( ${links.recommended} )
-`;
-  }
-
-  // 3) Generate itinerary text with links
-  const itineraryText = await generateItineraryText(
-    userRequestText,
-    viatorLinkBlock
-  );
-
-  // 4) Convert to PDF + upload to S3 (your existing code)
-  // ...
+  await generateItineraryText({
+    tripRequestText: userRequestText,
+    keyCities: cities,
+  });
+  // PDF + S3 + Twilio sending would go here
 }
 
+// (Legacy helper – not used in webhooks but kept for future use)
 async function handleItineraryUpdate(latestRow, updatedText) {
   const originalRequestText =
     latestRow.raw_details || latestRow.last_destination || "";
-  const cities = extractCitiesFromText(updatedText || originalRequestText);
 
-  let viatorLinkBlock = "";
-  for (const city of cities) {
-    const links = buildTourLinks(city);
-    viatorLinkBlock += `
-[${city} core tours]( ${links.core} )
-[${city} recommended tours]( ${links.recommended} )
-`;
-  }
-
-  const itineraryText = await generateUpdatedItineraryText(
-    originalRequestText,
-    updatedText,
-    viatorLinkBlock // if you want to also pass this in
-  );
-
-  // then PDF + S3 + Twilio
-}
-
-async function generateUpdatedItineraryText(
-  originalRequestText,
-  updatedRequestText,
-  viatorLinkBlock
-) {
-  const userPrompt = `
-Original request:
-${originalRequestText}
-
-Updated request:
-${updatedRequestText}
-
-Here is a block of Viator affiliate links you can suggest in the plan:
-${viatorLinkBlock}
-
-[rest of prompt...]
-`;
-  // ...
+  await generateUpdatedItineraryText({
+    originalItineraryText: originalRequestText,
+    editRequestText: updatedText,
+    latestTripDetails: updatedText || originalRequestText,
+  });
+  // PDF + S3 + Twilio sending would go here
 }
 
 // Fallback template if AI fails
@@ -403,7 +465,7 @@ function generateItineraryFallback(destination, details) {
 async function generateTravelAnswer(question, from) {
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
+      model: OPENAI_MODEL,
       messages: [
         {
           role: "system",
@@ -441,111 +503,128 @@ async function generateTravelAnswer(question, from) {
   }
 }
 
-// AI-powered full itinerary generation
-async function generateItineraryText(userRequestText, viatorLinkBlock) {
-  const systemPrompt = `
-You are Hugu Adventures' trip designer. You write polished, friendly, professional travel itineraries for WhatsApp users.
+// Very simple “main destination” extractor – you can improve later
+function detectMainDestination(tripDetails) {
+  // crude: look for “to X” or just take first capitalised word after “to”
+  const matchTo = tripDetails.match(/to\s+([A-Z][a-zA-Z\s]+)/);
+  if (matchTo) return matchTo[1].trim();
 
-[... same style rules as above ...]
-`;
+  // fallback: pick first capitalised word sequence
+  const matchCity = tripDetails.match(/([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)/);
+  if (matchCity) return matchCity[1].trim();
 
-  const userPrompt = `
-The user has paid for a custom itinerary.
-
-User request:
-${userRequestText}
-
-You are also given a block of Viator affiliate links that you may use for daily activity suggestions. They look like this, for different cities or themes:
-
-${viatorLinkBlock}
-
-Use these links where relevant in the itinerary as:
-[Book Tour Here](VIATOR_URL)
-
-Now write a complete day-by-day itinerary following the formatting and tone rules.
-`;
-
-  const response = await openai.responses.create({
-    model: OPENAI_MODEL,
-    input: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-  });
-
-  const output =
-    response.output?.[0]?.content?.[0]?.text ||
-    "Sorry, I could not generate an itinerary.";
-  return output;
+  return "Australia"; // very rough default for now
 }
 
-async function generateUpdatedItineraryText(
-  originalRequestText,
-  updatedRequestText
-) {
-  const systemPrompt = `
-You are Hugu Adventures' trip designer. You write polished, friendly, professional travel itineraries for WhatsApp users.
+// NEW itinerary text generator – returns itinerary text string
+async function generateItineraryText(optionsOrText) {
+  try {
+    let tripDetails = "";
+    let keyCities = [];
 
-Always:
-- Write in clear paragraphs and bullet points.
-- Use a warm, helpful, excited tone but keep it readable.
-- Respect the user’s budget (low / mid / luxury), trip length, and who is travelling (solo / couple / family / friends).
-- Spread out sightseeing so days are not too overloaded.
-- Where the user mentions road travel, include approximate driving times and distances between key stops (e.g. “Approx 280 km / 3.5 hours”).
-- For flights between cities, state approximate flight duration (e.g. “Flight ~3 hours”).
-- For each day, suggest 1–3 key activities or highlights.
-- For each activity, if a Viator link placeholder is provided to you, include it as: [Book Tour Here](VIATOR_URL_PLACEHOLDER).
-- Do NOT invent real URLs – just keep the placeholders I give you.
-- Keep total length suitable for a PDF (not insanely long, but detailed enough to feel valuable).
-`;
+    if (typeof optionsOrText === "string") {
+      tripDetails = optionsOrText;
+    } else if (optionsOrText && typeof optionsOrText === "object") {
+      tripDetails =
+        optionsOrText.tripRequestText ||
+        optionsOrText.tripDetails ||
+        "";
+      keyCities = optionsOrText.keyCities || [];
+    }
 
-  const userPrompt = `
-The user bought a paid custom itinerary and now wants an updated itinerary.
+    if (!tripDetails) {
+      tripDetails = "Trip details not fully specified.";
+    }
 
-Original request:
-${originalRequestText}
+    // Detect main destination
+    const mainDestination = detectMainDestination(tripDetails);
 
-Updated request:
-${updatedRequestText}
+    const viatorLinksByCity = {};
+    const cities =
+      keyCities && keyCities.length > 0 ? keyCities : [mainDestination];
 
-Please generate a revised full day-by-day itinerary that matches the UPDATED request, but you can reuse and improve ideas from the original plan.
+    for (const city of cities.filter(Boolean)) {
+      const [searchUrl, recommendedUrl] = buildTourLinks(city);
+      viatorLinksByCity[city] = [searchUrl, recommendedUrl];
+    }
 
-Formatting rules:
-- Start with a clear title on its own line, for example:
-  **__12-Day Australia Road Adventure from Sydney (Low Budget Solo)__**
-- For each day, use this structure:
+    const prompt = buildItineraryPrompt({
+      mode: "new",
+      tripDetails,
+      viatorLinksByCity,
+    });
 
-*Day X: Short Day Title*  
-• Morning: ... (mention key sights, approx driving/flying time if applicable)  
-• Afternoon: ...  
-• Evening: ...  
+    const response = await openai.responses.create({
+      model: ITINERARY_MODEL,
+      input: prompt,
+      max_output_tokens: 2500, // long itineraries
+    });
 
-- After each activity where I provide Viator search link placeholders such as:
-  [Book Tour Here](VIATOR_LINK_CITY_CORE)
-  [Book Tour Here](VIATOR_LINK_CITY_ADVENTURE)
-  etc., keep them as provided.
-- Focus on spreading the route to cover as many interesting Australian attractions as possible, while remaining realistic for road travel.
-- Assume the starting point and ending point are as per the user’s updated description.
-`;
+    const outputText =
+      response.output?.[0]?.content?.[0]?.text || null;
 
-  const response = await openai.responses.create({
-    model: OPENAI_MODEL,
-    input: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-  });
+    if (!outputText) {
+      throw new Error("No itinerary text returned from OpenAI");
+    }
 
-  const output =
-    response.output?.[0]?.content?.[0]?.text ||
-    "Sorry, I could not generate an itinerary.";
-  return output;
+    return outputText.trim();
+  } catch (err) {
+    console.error("Error in generateItineraryText:", err);
+    throw err;
+  }
+}
+
+// UPDATED itinerary text generator – returns updated itinerary text string
+async function generateUpdatedItineraryText(options) {
+  try {
+    const originalItineraryText = options.originalItineraryText || "";
+    const editRequestText =
+      options.editRequestText || options.userEditRequest || "";
+    const tripDetails =
+      options.latestTripDetails ||
+      options.tripDetails ||
+      options.tripRequestText ||
+      editRequestText ||
+      "No extra details provided";
+
+    const mainDestination = detectMainDestination(tripDetails);
+
+    const viatorLinksByCity = {};
+    const [searchUrl, recommendedUrl] = buildTourLinks(mainDestination);
+    viatorLinksByCity[mainDestination] = [searchUrl, recommendedUrl];
+
+    const prompt = buildItineraryPrompt({
+      mode: "update",
+      tripDetails,
+      previousItineraryText: originalItineraryText,
+      editRequestText,
+      viatorLinksByCity,
+    });
+
+    const response = await openai.responses.create({
+      model: ITINERARY_MODEL,
+      input: prompt,
+      max_output_tokens: 2500,
+    });
+
+    const outputText =
+      response.output?.[0]?.content?.[0]?.text || null;
+
+    if (!outputText) {
+      throw new Error("No updated itinerary text returned from OpenAI");
+    }
+
+    return outputText.trim();
+  } catch (err) {
+    console.error("Error in generateUpdatedItineraryText:", err);
+    throw err;
+  }
 }
 
 async function generateTripInspiration(preferences, from) {
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
+      model: OPENAI_MODEL,
       messages: [
         {
           role: "system",
@@ -624,7 +703,6 @@ async function uploadItineraryPdfToS3(buffer, key) {
     Key: objectKey,
     Body: buffer,
     ContentType: "application/pdf",
-    // No ACL here – bucket policy will handle public access
   });
 
   await s3.send(command);
@@ -1167,14 +1245,10 @@ app.post("/webhook", async (req, res) => {
 
           const current = r.rows[0];
           const originalItineraryText = current.itinerary_text || "";
-          const keyCities = current.last_destination
-            ? [current.last_destination]
-            : [];
-
           const updatedText = await generateUpdatedItineraryText({
             originalItineraryText,
-            userEditRequest: editRequest,
-            keyCities,
+            editRequestText: editRequest,
+            latestTripDetails: editRequest,
           });
 
           await db.query(
