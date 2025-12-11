@@ -232,6 +232,14 @@ function makeCityKey(city) {
     .replace(/^_+|_+$/g, "");
 }
 
+// ===== VIATOR CONFIG =====
+const {
+  VIATOR_AFFILIATE_SUFFIX,
+  VIATOR_API_KEY,
+  VIATOR_API_BASE,
+  VIATOR_AFFILIATE_BASE,
+} = process.env;
+
 // ===== Viator API helper (Basic Access) =====
 
 // Call Viator's Partner API to fetch top tours for a city / keyword
@@ -322,49 +330,24 @@ const VIATOR_AFFILIATE_PARAMS =
 const VIATOR_CURRENCY = process.env.VIATOR_CURRENCY || "USD";
 
 // Single source of truth for Viator links
-// ===== AFFILIATE LINK HELPERS =====
-
-// ===== Affiliate search links (current working approach) =====
-
+// Affiliate search links (current working approach)
 function buildTourLinks(city) {
-  const baseUrl = "https://www.viator.com/searchResults/all";
+  const base =
+    VIATOR_AFFILIATE_BASE ||
+    "https://www.viator.com/searchResults/all?text=";
+
   const encodedCity = encodeURIComponent(city.trim());
-  const suffix = VIATOR_AFFILIATE_SUFFIX || "";
 
   // Example full suffix (in .env):
   // VIATOR_AFFILIATE_SUFFIX=&pid=P00240917&uid=U00642340&mcid=58086&currency=USD
   // NOTE: suffix MUST start with "&", not "?".
+  const suffix = VIATOR_AFFILIATE_SUFFIX || "";
 
-  const searchUrl = `${baseUrl}?text=${encodedCity}${suffix}`;
-  const recommendedUrl = `${baseUrl}?text=${encodedCity}${suffix}&sort=RECOMMENDED`;
+  const searchUrl = `${base}${encodedCity}${suffix}`;
+  const recommendedUrl = `${base}${encodedCity}${suffix}&sort=RECOMMENDED`;
 
   return { searchUrl, recommendedUrl };
 }
-
-
-  // Configure via env to keep links consistent everywhere
-  const base =
-    process.env.VIATOR_AFFILIATE_BASE ||
-    "https://www.viator.com/searchResults/all?text=";
-
-  // Example suffix you can use in .env:
-  // VIATOR_AFFILIATE_SUFFIX=&pid=P00240917&uid=U00642340&mcid=58086&currency=USD
-  const {
-  // ...existing vars...
-  VIATOR_AFFILIATE_SUFFIX,
-  VIATOR_API_KEY,
-  VIATOR_API_BASE,
-} = process.env;
-
-  // Base search URL (monetised)
-  const search_url = `${base}${encoded}${suffix}`;
-
-  // Recommended sort variant (still monetised)
-  const recommended_url = `${base}${encoded}${suffix}&sort=RECOMMENDED`;
-
-  return { search_url, recommended_url };
-}
-
 
 // (Legacy helper – not used at runtime, kept for future re-use)
 function buildViatorLinksBlock(keyCities) {
@@ -893,10 +876,10 @@ function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
         // Detect our "Book Tour Here" lines and attach a proper affiliate link
         if (/^\[Book Tour Here\]/i.test(trimmed)) {
           const cityForLink = currentCity || defaultCity || "Australia";
-          const { recommended_url, search_url } =
+          const { recommendedUrl, searchUrl } =
             buildTourLinks(cityForLink) || {};
           const url =
-            recommended_url || search_url || "https://www.viator.com/searchResults/all";
+            recommendedUrl || searchUrl || "https://www.viator.com/searchResults/all";
 
           doc.moveDown(0.3);
           doc.font("Helvetica-Bold").fontSize(11).fillColor("#0056b3");
