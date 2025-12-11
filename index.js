@@ -46,6 +46,29 @@ const {
 const accountSid = TWILIO_SID || TWILIO_ACCOUNT_SID;
 const authToken = TWILIO_AUTH || TWILIO_AUTH_TOKEN;
 
+// WhatsApp deep-link helper for Paystack callback
+const TWILIO_WHATSAPP_FROM =
+  process.env.TWILIO_NUMBER || process.env.TWILIO_WHATSAPP_NUMBER || "";
+
+// Build a WhatsApp deep link so Paystack can send the user *back to chat*
+function getWhatsappDeepLink() {
+  if (!TWILIO_WHATSAPP_FROM) return null;
+
+  // "whatsapp:+14155238886" -> "14155238886"
+  const plain = TWILIO_WHATSAPP_FROM.replace(/^whatsapp:/, "").replace(
+    /\D/g,
+    ""
+  );
+  if (!plain) return null;
+
+  const text = encodeURIComponent(
+    "Hi, I have completed payment for my custom itinerary."
+  );
+
+  // This opens the chat with your Twilio WhatsApp number
+  return `https://api.whatsapp.com/send?phone=${plain}&text=${text}`;
+}
+
 // Minimal safe debug (no secrets printed)
 console.log(
   "Twilio SID present:",
@@ -147,6 +170,11 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
 
   const reference = `ITIN_${itineraryRequestId}_${Date.now()}`;
 
+  const callbackUrl =
+    process.env.PAYSTACK_CALLBACK_URL ||
+    getWhatsappDeepLink() ||
+    "https://huguadventures.com/itinerary/thanks"; // last fallback
+
   const payload = {
     amount: itineraryAmountSmallest, // already in smallest unit
     currency: itineraryCurrency,
@@ -157,19 +185,15 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
       itinerary_request_id: itineraryRequestId,
       purpose: "custom_itinerary",
     },
-    callback_url: "https://your-domain.com/payment/thanks",
+    callback_url: callbackUrl,
   };
 
-  const res = await axios.post(
-    `${paystackBase}/transaction/initialize`,
-    payload,
-    {
-      headers: {
-        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
+  const res = await axios.post(`${paystackBase}/transaction/initialize`, payload, {
+    headers: {
+      Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+      "Content-Type": "application/json",
+    },
+  });
 
   const data = res.data;
   if (!data.status) {
@@ -184,26 +208,6 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
 
 // ===== AFFILIATE LINK HELPERS =====
 
-// Viator / tours links
-function buildTourLinks(destination) {
-  const encoded = encodeURIComponent(destination.trim());
-
-  // Configure via env to keep links consistent everywhere
-  const base =
-    process.env.VIATOR_AFFILIATE_BASE ||
-    "https://www.viator.com/searchResults/all?text=";
-
-  const suffix = process.env.VIATOR_AFFILIATE_SUFFIX || "";
-
-  // Base search URL
-  const search_url = `${base}${encoded}${suffix}`;
-
-  // Recommended sort variant
-  const recommended_url = `${base}${encoded}${suffix}&sort=RECOMMENDED`;
-
-  return { search_url, recommended_url };
-}
-
 // Turn "Sydney" -> "SYDNEY", "Great Barrier Reef" -> "GREAT_BARRIER_REEF"
 function makeCityKey(city) {
   return city
@@ -213,7 +217,7 @@ function makeCityKey(city) {
     .replace(/^_+|_+$/g, "");
 }
 
-// Build placeholder map from cities with links
+// Build placeholder map from cities (still useful if you ever want placeholders)
 function buildViatorPlaceholderMap(cities) {
   const result = {};
 
@@ -230,106 +234,26 @@ function buildViatorPlaceholderMap(cities) {
   return result;
 }
 
-// ===== ITINERARY PROMPT TEMPLATE =====
+const VIATOR_AFFILIATE_PARAMS =
+  process.env.VIATOR_AFFILIATE_PARAMS ||
+  "pid=P00240917&uid=U00642340&mcid=58086";
 
-function buildItineraryPrompt({
-  mode, // "new" or "update"
-  tripDetails,
-  previousItineraryText,
-  editRequestText,
-  viatorPlaceholdersByCity, // NOT URLs – just placeholders
-}) {
-  const placeholderJson = JSON.stringify(viatorPlaceholdersByCity || {}, null, 2);
+const VIATOR_CURRENCY = process.env.VIATOR_CURRENCY || "USD";
 
-  return `
-You are a professional travel planner for Hugu Adventures, creating friendly, clear, and practical itineraries that will be exported directly to PDF.
+// Single source of truth for Viator links
+function buildTourLinks(city) {
+  const query = encodeURIComponent(city);
+  const base =
+    process.env.VIATOR_BASE_URL ||
+    "https://www.viator.com/searchResults/all";
 
-USER TRIP REQUEST:
-"""${tripDetails}"""
+  const common = `text=${query}&${VIATOR_AFFILIATE_PARAMS}&currency=${VIATOR_CURRENCY}`;
 
-AVAILABLE VIATOR PLACEHOLDERS (JSON OBJECT):
-${placeholderJson}
-
-Each entry looks like:
-{
-  "Sydney": {
-    "key": "SYDNEY",
-    "searchPlaceholder": "VIATOR_SYDNEY_SEARCH",
-    "recommendedPlaceholder": "VIATOR_SYDNEY_RECOMMENDED"
-  }
-}
-
-IMPORTANT:
-- Do NOT invent any URLs.
-- Do NOT write "https://..." links yourself.
-- When you want to insert a "Book Tour" link for a specific city, you MUST use the placeholders given.
-  Example:
-  [Book Tour Here] VIATOR_SYDNEY_RECOMMENDED
-
-${
-  mode === "update"
-    ? `PREVIOUS ITINERARY (TEXT VERSION):
-"""${previousItineraryText || ""}"""
-
-TRAVELLER'S CHANGE REQUEST:
-"""${editRequestText || ""}"""
-`
-    : ""
-}
-
-YOUR TASK:
-
-1. If this is a *new* itinerary, create a full, day–by–day itinerary *from scratch* based ONLY on the user's trip request.
-2. If this is an *update*, understand the previous itinerary and the requested changes, then create a **new updated itinerary** that clearly reflects the new details (destinations, days, style, budget).
-
-FORMATTING RULES (IMPORTANT – THIS GOES STRAIGHT TO PDF):
-- Plain text only (no Markdown bullet symbols).
-- Use this style for the main title:
-  **__TRIP TITLE GOES HERE__**
-- For each day:
-  Day X: Short day title
-- Put a blank line between paragraphs and days.
-- Tone: happy, helpful, and reassuring.
-
-CONTENT RULES:
-
-A) STRUCTURE
-- Start with a 2–3 line overview of the trip.
-- Then list days in order: Day 1, Day 2, Day 3, etc.
-- Ensure the total number of days matches the user's request.
-
-B) TRANSPORT & DISTANCES
-For any move between cities or major stops:
-- State if it is by road or by flight (following the user’s request).
-- Include approximate:
-  - Driving distance in km and driving time in hours for road segments.
-  - Flight duration and typical route for flights.
-- Example:
-  Travel: Sydney → Blue Mountains (approx. 110 km, 2–2.5 hours by road).
-
-C) DAILY DETAIL
-For each day:
-- Morning: realistic activity description.
-- Afternoon: more activities or travel to next place.
-- Evening: relaxed suggestions (walks, viewpoints, local food, etc.).
-- Match the requested budget (low / mid / luxury) and traveller type (solo / couple / family / friends).
-
-D) VIATOR [Book Tour Here] LINES
-- Use the placeholders in the JSON above.
-- When recommending an activity in a city that appears in the JSON, after describing it, add a line like:
-  [Book Tour Here] VIATOR_SYDNEY_RECOMMENDED
-- Prefer the "recommendedPlaceholder" where available.
-- Include at least one [Book Tour Here] line on each day that has activities.
-
-E) FINAL TONE
-- Make the trip sound exciting but achievable on the specified budget.
-- Emphasise variety: culture, nature, local food, unique experiences.
-- Do not mention that this text will become a PDF.
-- Do not mention placeholders or internal rules.
-
-OUTPUT:
-Return ONLY the final itinerary text in the required format. Do NOT include explanations, notes, or JSON.
-`;
+  return {
+    city,
+    searchUrl: `${base}?${common}`,
+    recommendedUrl: `${base}?${common}&sort=RECOMMENDED`,
+  };
 }
 
 // (Legacy helper – not used at runtime, kept for future re-use)
@@ -337,8 +261,8 @@ function buildViatorLinksBlock(keyCities) {
   if (!keyCities || keyCities.length === 0) return "None.";
 
   const lines = keyCities.map((city) => {
-    const { search_url, recommended_url } = buildTourLinks(city);
-    const url = recommended_url || search_url || "";
+    const { searchUrl, recommendedUrl } = buildTourLinks(city);
+    const url = recommendedUrl || searchUrl || "";
     return `- ${city} tours: [Book Tour Here] ${url}`;
   });
 
@@ -439,7 +363,13 @@ async function handlePaidItinerary(itineraryRow) {
 
   const tripDetails = userRequestText || "Trip details not fully specified.";
 
-  await generateItineraryText(tripDetails);
+  const raw = await generateItineraryText({
+    originalRequest: tripDetails,
+    budget: null,
+    days: extractDaysFromDetails(tripDetails),
+  });
+
+  postProcessItineraryWithLinks(raw);
   // PDF + S3 + Twilio sending would go here
 }
 
@@ -448,11 +378,12 @@ async function handleItineraryUpdate(latestRow, updatedText) {
   const originalRequestText =
     latestRow.raw_details || latestRow.last_destination || "";
 
-  await generateUpdatedItineraryText({
-    originalItineraryText: originalRequestText,
-    editRequestText: updatedText,
-    latestTripDetails: updatedText || originalRequestText,
+  const raw = await generateUpdatedItineraryText({
+    originalItinerary: originalRequestText,
+    updateRequest: updatedText,
   });
+
+  postProcessItineraryWithLinks(raw);
   // PDF + S3 + Twilio sending would go here
 }
 
@@ -541,175 +472,158 @@ function detectMainDestination(tripDetails) {
   return null;
 }
 
-// ===== NEW itinerary text generator – placeholders → real affiliate URLs =====
-async function generateItineraryText(tripDetails) {
-  try {
-    const details = tripDetails || "";
+// ===== NEW itinerary text generator + update generator (no URLs, DESTINATIONS_FOR_LINKS) =====
 
-    // 1) Find all relevant cities from the request
-    let cities = extractCitiesFromText(details);
+async function generateItineraryText({ originalRequest, budget, days }) {
+  const systemPrompt =
+    "You are Hugu Adventures’ travel planning assistant. " +
+    "You write clear, friendly, professional, day-by-day travel itineraries.";
 
-    // 2) Also detect main destination and ensure it is included
-    const mainDestination = detectMainDestination(details);
-    if (mainDestination && !cities.includes(mainDestination)) {
-      cities.push(mainDestination);
-    }
+  const userPrompt = `
+Write a detailed multi-day itinerary in markdown.
 
-    // 3) Fallback if nothing detected
-    if (!cities.length) {
-      cities.push("Australia");
-    }
+Trip request:
+${originalRequest}
 
-    // 4) Build placeholder map
-    const viatorPlaceholdersByCity = buildViatorPlaceholderMap(cities);
+Trip context:
+- Approx. number of days: ${days || "match the request"}
+- Budget: ${budget || "not specified"}
+- Tone: friendly, practical, and encouraging. Assume the user is serious about booking.
 
-    // 5) Build prompt
-    const prompt = buildItineraryPrompt({
-      mode: "new",
-      tripDetails: details,
-      viatorPlaceholdersByCity,
-    });
+Formatting rules:
+- Use clear day headings like "**__Day 1 – Sydney arrival & harbour views__**".
+- For each day, use bullet points for Morning / Afternoon / Evening.
+- When the traveller moves between cities, include approximate driving or flying time and distance (e.g. "Drive ~280 km, about 3.5 hours").
+- Do NOT include any URLs or web links in the itinerary body. Do not mention Viator or booking links; we will add those ourselves later.
+- Use a happy, helpful tone that makes the user feel excited and confident.
 
-    const response = await openai.responses.create({
-      model: ITINERARY_MODEL, // e.g. "gpt-4.1-mini"
-      input: prompt,
-      max_output_tokens: 2500,
-    });
+Very important:
+- At the very end of your reply, after everything else, add ONE line in **this exact format** (no markdown, no bullets, no extra text):
 
-    let text =
-      response.output &&
-      response.output[0] &&
-      response.output[0].content &&
-      response.output[0].content[0] &&
-      response.output[0].content[0].text;
+DESTINATIONS_FOR_LINKS: CityOne | CityTwo | CityThree
 
-    if (!text) {
-      throw new Error("No itinerary text returned from OpenAI");
-    }
+Where:
+- List the main cities or regions visited in the itinerary.
+- Maximum 8 items.
+- Use short, clean names like "Sydney", "Cairns", "Great Ocean Road".
+`.trim();
 
-    text = text.trim();
+  const completion = await openai.chat.completions.create({
+    model: OPENAI_MODEL,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    temperature: 0.7,
+  });
 
-    // 6) POST-PROCESS: replace placeholders with real affiliate URLs for each city
-    for (const city of cities) {
-      const placeholders = viatorPlaceholdersByCity[city];
-      if (!placeholders) continue;
-
-      const links = buildTourLinks(city); // returns { search_url, recommended_url }
-      if (!links) continue;
-
-      const { searchPlaceholder, recommendedPlaceholder } = placeholders;
-      const { search_url, recommended_url } = links;
-
-      if (searchPlaceholder) {
-        text = text.replaceAll(
-          searchPlaceholder,
-          search_url || recommended_url || ""
-        );
-      }
-
-      if (recommendedPlaceholder) {
-        text = text.replaceAll(
-          recommendedPlaceholder,
-          recommended_url || search_url || ""
-        );
-      }
-    }
-
-    return {
-      itineraryText: text,
-    };
-  } catch (err) {
-    console.error("Error in generateItineraryText:", err);
-    throw err;
-  }
+  return completion.choices[0]?.message?.content?.trim();
 }
 
-// ===== UPDATED itinerary text generator – placeholders → real affiliate URLs =====
 async function generateUpdatedItineraryText({
-  originalItineraryText,
-  editRequestText,
-  latestTripDetails,
+  originalItinerary,
+  updateRequest,
+  budget,
+  days,
 }) {
-  try {
-    const tripDetails =
-      latestTripDetails || editRequestText || originalItineraryText || "";
+  const systemPrompt =
+    "You are Hugu Adventures’ travel planning assistant. " +
+    "You write clear, friendly, professional, day-by-day travel itineraries.";
 
-    // 1) Gather cities from the most up-to-date description
-    let cities = extractCitiesFromText(tripDetails);
+  const userPrompt = `
+You are updating an existing itinerary based on new traveller instructions.
 
-    // 2) Ensure main destination is included as well
-    const mainDestination = detectMainDestination(tripDetails);
-    if (mainDestination && !cities.includes(mainDestination)) {
-      cities.push(mainDestination);
-    }
+Original itinerary:
+${originalItinerary || "N/A"}
 
-    // 3) Fallback if still empty
-    if (!cities.length) {
-      cities.push("Australia");
-    }
+Traveller's change request:
+${updateRequest || "No specific changes provided."}
 
-    const viatorPlaceholdersByCity = buildViatorPlaceholderMap(cities);
+Trip context:
+- Approx. number of days: ${days || "match or adjust as needed"}
+- Budget: ${budget || "not specified"}
+- Tone: friendly, practical, and encouraging. Assume the user is serious about booking.
 
-    const prompt = buildItineraryPrompt({
-      mode: "update",
-      tripDetails,
-      previousItineraryText: originalItineraryText,
-      editRequestText,
-      viatorPlaceholdersByCity,
-    });
+Task:
+Rewrite the itinerary as a fresh, updated version that clearly reflects the traveller's new preferences.
 
-    const response = await openai.responses.create({
-      model: ITINERARY_MODEL,
-      input: prompt,
-      max_output_tokens: 2500,
-    });
+Formatting rules:
+- Use clear day headings like "**__Day 1 – Sydney arrival & harbour views__**".
+- For each day, use bullet points for Morning / Afternoon / Evening.
+- When the traveller moves between cities, include approximate driving or flying time and distance (e.g. "Drive ~280 km, about 3.5 hours").
+- Do NOT include any URLs or web links in the itinerary body. Do not mention Viator or booking links; we will add those ourselves later.
+- Use a happy, helpful tone that makes the user feel excited and confident.
 
-    let text =
-      response.output &&
-      response.output[0] &&
-      response.output[0].content &&
-      response.output[0].content[0] &&
-      response.output[0].content[0].text;
+Very important:
+- At the very end of your reply, after everything else, add ONE line in **this exact format** (no markdown, no bullets, no extra text):
 
-    if (!text) {
-      throw new Error("No updated itinerary text returned from OpenAI");
-    }
+DESTINATIONS_FOR_LINKS: CityOne | CityTwo | CityThree
 
-    text = text.trim();
+Where:
+- List the main cities or regions visited in the itinerary.
+- Maximum 8 items.
+- Use short, clean names like "Sydney", "Cairns", "Great Ocean Road".
+`.trim();
 
-    // Replace placeholders with real affiliate URLs
-    for (const city of cities) {
-      const placeholders = viatorPlaceholdersByCity[city];
-      if (!placeholders) continue;
+  const completion = await openai.chat.completions.create({
+    model: OPENAI_MODEL,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    temperature: 0.7,
+  });
 
-      const links = buildTourLinks(city);
-      if (!links) continue;
+  return completion.choices[0]?.message?.content?.trim();
+}
 
-      const { searchPlaceholder, recommendedPlaceholder } = placeholders;
-      const { search_url, recommended_url } = links;
+// ===== Post-process AI text and inject affiliate links =====
 
-      if (searchPlaceholder) {
-        text = text.replaceAll(
-          searchPlaceholder,
-          search_url || recommended_url || ""
-        );
-      }
+function extractDestinationsForLinks(itineraryText) {
+  if (!itineraryText) return [];
+  const match = itineraryText.match(/^DESTINATIONS_FOR_LINKS:(.*)$/m);
+  if (!match) return [];
 
-      if (recommendedPlaceholder) {
-        text = text.replaceAll(
-          recommendedPlaceholder,
-          recommended_url || search_url || ""
-        );
-      }
-    }
+  const line = match[1] || "";
+  return line
+    .split("|")
+    .map((x) => x.replace(/[*_]/g, "").trim())
+    .filter(Boolean);
+}
 
-    return {
-      updatedItineraryText: text,
-    };
-  } catch (err) {
-    console.error("Error in generateUpdatedItineraryText:", err);
-    throw err;
+function stripDestinationsLine(itineraryText) {
+  if (!itineraryText) return "";
+  return itineraryText.replace(/^DESTINATIONS_FOR_LINKS:.*$/m, "").trim();
+}
+
+function appendAffiliateLinksSection(itineraryBody, cities) {
+  if (!cities || !cities.length) return itineraryBody;
+
+  const parts = [];
+  parts.push(itineraryBody.trim());
+  parts.push("");
+  parts.push("__Suggested tours & activities (via Hugu Adventures)__");
+  parts.push("");
+  parts.push(
+    "Below are Viator tour search links for the main destinations in this itinerary (affiliate links):"
+  );
+  parts.push("");
+
+  for (const city of cities) {
+    const { searchUrl, recommendedUrl } = buildTourLinks(city);
+    parts.push(
+      `- *${city}*: [Browse all tours](${searchUrl}) | [Top rated & recommended](${recommendedUrl})`
+    );
   }
+
+  return parts.join("\n");
+}
+
+function postProcessItineraryWithLinks(rawText) {
+  const cities = extractDestinationsForLinks(rawText);
+  const body = stripDestinationsLine(rawText);
+  const finalText = appendAffiliateLinksSection(body, cities);
+  return { cities, text: finalText };
 }
 
 async function generateTripInspiration(preferences) {
@@ -832,15 +746,26 @@ app.post("/paystack/webhook", async (req, res) => {
           const details = row.raw_details || "";
           const dest = row.last_destination || "your trip";
 
-          // 1) Generate itinerary text (AI)
+          // 1) Generate itinerary text (AI) + affiliate links section
           let itineraryText;
           try {
             const tripDetails = details || `Trip to ${dest}`;
-            const { itineraryText: generatedText } =
-              await generateItineraryText(tripDetails);
-            itineraryText = generatedText;
+
+            const rawItineraryText = await generateItineraryText({
+              originalRequest: tripDetails,
+              budget: null,
+              days: extractDaysFromDetails(tripDetails),
+            });
+
+            const { text: finalItineraryText } =
+              postProcessItineraryWithLinks(rawItineraryText);
+
+            itineraryText = finalItineraryText;
           } catch (genErr) {
-            console.error("Error generating AI itinerary, using fallback:", genErr);
+            console.error(
+              "Error generating AI itinerary, using fallback:",
+              genErr
+            );
             itineraryText = generateItineraryFallback(dest, details);
           }
 
@@ -1011,7 +936,7 @@ app.post("/webhook", async (req, res) => {
     if (text === "edit itinerary" || text === "edit trip") {
       try {
         const r = await db.query(
-          `SELECT id, itinerary_text, editable_until
+          `SELECT id, itinerary_text, editable_until, last_destination
            FROM itinerary_requests
            WHERE whatsapp_number = $1
              AND payment_status = 'paid'
@@ -1147,15 +1072,20 @@ app.post("/webhook", async (req, res) => {
         const dest = body;
         session.lastDestination = dest;
 
-        const { search_url, recommended_url } = buildTourLinks(dest);
-        const linkList = [search_url, recommended_url].filter(Boolean);
+        const { searchUrl, recommendedUrl } = buildTourLinks(dest);
 
-        const linksText =
+        const reply =
           `Great choice! 🎉 Here are *tour ideas* for *${dest}* on Viator:\n\n` +
-          linkList.map((l) => `🔗 ${l}`).join("\n") +
-          "\n\n";
+          `🔗 ${searchUrl}\n` +
+          `🔗 ${recommendedUrl}\n\n` +
+          `Would you like me to build a *detailed day-by-day itinerary* for *${dest}* from just *$5*? 🧳✨\n` +
+          `You’ll get:\n` +
+          `• A suggested day-by-day plan\n` +
+          `• Tours, hotels, and optional activities linked\n` +
+          `• Ability to request edits for up to *3 days*\n\n` +
+          `Reply *YES* to learn how it works, or *MENU* to go back.`;
 
-        await sendWhatsApp(from, linksText + itineraryUpsellText(dest));
+        await sendWhatsApp(from, reply);
         session.state = "AFTER_LINKS";
         break;
       }
@@ -1338,14 +1268,19 @@ app.post("/webhook", async (req, res) => {
 
           const current = r.rows[0];
           const originalItineraryText = current.itinerary_text || "";
+          const dest = current.last_destination || "your trip";
 
-          const { updatedItineraryText } = await generateUpdatedItineraryText({
-            originalItineraryText,
-            editRequestText: editRequest,
-            latestTripDetails: editRequest,
+          const rawUpdated = await generateUpdatedItineraryText({
+            originalItinerary: originalItineraryText,
+            updateRequest: editRequest,
+            budget: null,
+            days: extractDaysFromDetails(editRequest),
           });
 
-          const updatedText = updatedItineraryText;
+          const { text: finalUpdatedText } =
+            postProcessItineraryWithLinks(rawUpdated);
+
+          const updatedText = finalUpdatedText;
 
           await db.query(
             "UPDATE itinerary_requests SET itinerary_text = $1, raw_details = $2 WHERE id = $3",
@@ -1353,7 +1288,6 @@ app.post("/webhook", async (req, res) => {
           );
 
           try {
-            const dest = current.last_destination || "your trip";
             const pdfTitle = `Updated itinerary for ${dest}`;
             const pdfBuffer = await generateItineraryPdfBuffer(
               updatedText,
