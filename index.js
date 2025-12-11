@@ -16,6 +16,7 @@ const openai = new OpenAI({
 });
 
 const app = express();
+
 // Twilio sends x-www-form-urlencoded by default
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
@@ -45,29 +46,6 @@ const {
 // Support both styles of env var naming
 const accountSid = TWILIO_SID || TWILIO_ACCOUNT_SID;
 const authToken = TWILIO_AUTH || TWILIO_AUTH_TOKEN;
-
-// WhatsApp deep-link helper for Paystack callback
-const TWILIO_WHATSAPP_FROM =
-  process.env.TWILIO_NUMBER || process.env.TWILIO_WHATSAPP_NUMBER || "";
-
-// Build a WhatsApp deep link so Paystack can send the user *back to chat*
-function getWhatsappDeepLink() {
-  if (!TWILIO_WHATSAPP_FROM) return null;
-
-  // "whatsapp:+14155238886" -> "14155238886"
-  const plain = TWILIO_WHATSAPP_FROM.replace(/^whatsapp:/, "").replace(
-    /\D/g,
-    ""
-  );
-  if (!plain) return null;
-
-  const text = encodeURIComponent(
-    "Hi, I have completed payment for my custom itinerary."
-  );
-
-  // This opens the chat with your Twilio WhatsApp number
-  return `https://api.whatsapp.com/send?phone=${plain}&text=${text}`;
-}
 
 // Minimal safe debug (no secrets printed)
 console.log(
@@ -178,7 +156,9 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
     // e.g. https://wa.me/14155238886?text=I%20have%20completed%20payment
     if (TWILIO_NUMBER && TWILIO_NUMBER.startsWith("whatsapp:+")) {
       const waNumber = TWILIO_NUMBER.replace("whatsapp:+", "");
-      const encodedMsg = encodeURIComponent("I have completed payment for my itinerary");
+      const encodedMsg = encodeURIComponent(
+        "I have completed payment for my itinerary"
+      );
       callbackUrl = `https://wa.me/${waNumber}?text=${encodedMsg}`;
     } else {
       // Last-resort fallback – your site "thanks" page if you have one
@@ -251,7 +231,7 @@ async function fetchViatorTopToursForCity(city, options = {}) {
   }
 
   const {
-    limit = 5,        // how many tours to return
+    limit = 5, // how many tours to return
     currency = "USD", // adjust if needed
     sort = "RECOMMENDED",
   } = options;
@@ -275,7 +255,7 @@ async function fetchViatorTopToursForCity(city, options = {}) {
 
     const response = await axios.post(url, payload, {
       headers: {
-        "Accept": "application/json",
+        Accept: "application/json",
         "Content-Type": "application/json",
         "X-API-Key": VIATOR_API_KEY,
       },
@@ -765,7 +745,7 @@ async function generateTripInspiration(preferences) {
 
 // ===== PDF + S3 HELPERS =====
 
-// Light-weight city detection for PDF linking – extend as you wish
+// City detection for PDF – extend as you wish
 const PDF_CITY_KEYWORDS = [
   // Australia
   "Sydney",
@@ -783,7 +763,7 @@ const PDF_CITY_KEYWORDS = [
   "Blue Mountains",
   "Barossa Valley",
   "Rottnest Island",
-  // East Africa (for your Kenya itineraries, etc.)
+  // East Africa
   "Nairobi",
   "Amboseli",
   "Maasai Mara",
@@ -828,14 +808,16 @@ function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
       const defaultCity = getDefaultCityFromTitle(title) || "Your Trip";
 
       // --- Header ---
-      doc.font("Helvetica-Bold")
+      doc
+        .font("Helvetica-Bold")
         .fontSize(18)
         .fillColor("#333333")
         .text(title, { align: "center" });
 
       doc.moveDown(0.3);
 
-      doc.font("Helvetica")
+      doc
+        .font("Helvetica")
         .fontSize(10)
         .fillColor("#777777")
         .text(`Hugu Adventures · ${defaultCity}`, { align: "center" });
@@ -863,11 +845,15 @@ function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
           currentCity = cityInLine;
         }
 
-        // Detect Day headings like "Day 7: Flight to Melbourne – Culture Capital"
-        if (/^Day\s+\d+:/i.test(trimmed)) {
+        // Day headings like "**__Day 1 – Sydney arrival & harbour views__**"
+        const cleanedHeading = trimmed.replace(/^[#*_>\s]+/, "");
+        if (/^Day\s+\d+/i.test(cleanedHeading)) {
           doc.moveDown(0.6);
-          doc.font("Helvetica-Bold").fontSize(13).fillColor("#222222");
-          doc.text(trimmed, { align: "left" });
+          doc
+            .font("Helvetica-Bold")
+            .fontSize(13)
+            .fillColor("#222222");
+          doc.text(cleanedHeading, { align: "left" });
           doc.moveDown(0.3);
           doc.font("Helvetica").fontSize(11).fillColor("#000000");
           continue;
@@ -879,12 +865,17 @@ function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
           const { recommendedUrl, searchUrl } =
             buildTourLinks(cityForLink) || {};
           const url =
-            recommendedUrl || searchUrl || "https://www.viator.com/searchResults/all";
+            recommendedUrl ||
+            searchUrl ||
+            "https://www.viator.com/searchResults/all";
 
           doc.moveDown(0.3);
-          doc.font("Helvetica-Bold").fontSize(11).fillColor("#0056b3");
+          doc
+            .font("Helvetica-Bold")
+            .fontSize(11)
+            .fillColor("#0056b3");
 
-          // Clickable link annotation – the viewer will use the full URL (no more truncation at '?')
+          // Clickable link annotation – the viewer will use the full URL
           doc.text(`Book tours in ${cityForLink}`, {
             link: url,
             underline: true,
@@ -895,22 +886,22 @@ function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
         }
 
         // Generic text line
-        doc.text(trimmed, {
+        doc.text(cleanedHeading === trimmed ? trimmed : cleanedHeading, {
           align: "left",
           lineGap: 4,
         });
         doc.moveDown(0.1);
       }
 
-      // --- Simple footer "feel" at the end of the document ---
+      // --- Simple footer at the end of the document ---
       doc.moveDown(1.0);
-      doc.font("Helvetica")
+      doc
+        .font("Helvetica")
         .fontSize(9)
         .fillColor("#777777")
-        .text(
-          `Prepared by Hugu Adventures · ${defaultCity}`,
-          { align: "center" }
-        );
+        .text(`Prepared by Hugu Adventures · ${defaultCity}`, {
+          align: "center",
+        });
 
       doc.end();
     } catch (err) {
