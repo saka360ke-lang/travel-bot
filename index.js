@@ -32,7 +32,7 @@ const {
   DATABASE_URL,
   PORT,
   // Optional affiliate base URLs
-  VIATOR_BASE_URL,
+  VIATOR_BASE_URL, // not used directly, kept for compatibility
   BOOKING_BASE_URL,
   FLIGHTS_BASE_URL,
   // Paystack
@@ -60,8 +60,7 @@ const db = new Pool({
   connectionString: DATABASE_URL,
 });
 
-const OPENAI_MODEL =
-  process.env.OPENAI_MODEL || "gpt-4.1-mini"; // or "gpt-4o-mini"
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini"; // or "gpt-4o-mini"
 const ITINERARY_MODEL = process.env.ITINERARY_MODEL || "gpt-4.1-mini";
 
 const s3 = new S3Client({
@@ -189,6 +188,7 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
 function buildTourLinks(destination) {
   const encoded = encodeURIComponent(destination.trim());
 
+  // Configure via env to keep links consistent everywhere
   const base =
     process.env.VIATOR_AFFILIATE_BASE ||
     "https://www.viator.com/searchResults/all?text=";
@@ -332,13 +332,14 @@ Return ONLY the final itinerary text in the required format. Do NOT include expl
 `;
 }
 
+// (Legacy helper – not used at runtime, kept for future re-use)
 function buildViatorLinksBlock(keyCities) {
   if (!keyCities || keyCities.length === 0) return "None.";
 
   const lines = keyCities.map((city) => {
     const { search_url, recommended_url } = buildTourLinks(city);
     const url = recommended_url || search_url || "";
-    return `- ${city} tours: [Book Tour Here](${url})`;
+    return `- ${city} tours: [Book Tour Here] ${url}`;
   });
 
   return lines.join("\n");
@@ -402,10 +403,11 @@ function extractDaysFromDetails(details) {
   return null;
 }
 
-// Extract likely city/region keywords from the request – for now, simple heuristics:
+// Extract likely city/region keywords from the request – simple heuristics:
 function extractCitiesFromText(text) {
-  // Very simple approach: you can improve later
+  if (!text) return [];
   const candidates = [
+    // Australia (for now, can extend later)
     "Sydney",
     "Melbourne",
     "Cairns",
@@ -414,6 +416,9 @@ function extractCitiesFromText(text) {
     "Adelaide",
     "Darwin",
     "Hobart",
+    "Gold Coast",
+    "Byron Bay",
+    "Canberra",
   ];
   const found = [];
   const lower = text.toLowerCase();
@@ -424,7 +429,6 @@ function extractCitiesFromText(text) {
     }
   }
 
-  // Always at least include one city if the text has “Sydney” etc.
   return [...new Set(found)];
 }
 
@@ -481,7 +485,7 @@ function generateItineraryFallback(destination, details) {
 }
 
 // AI-powered itinerary generation – travel Q&A
-async function generateTravelAnswer(question, from) {
+async function generateTravelAnswer(question) {
   try {
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
@@ -522,9 +526,11 @@ async function generateTravelAnswer(question, from) {
   }
 }
 
-// Very simple “main destination” extractor – you can improve later
+// Very simple “main destination” extractor – can be improved later
 function detectMainDestination(tripDetails) {
-  // crude: look for “to X” or just take first capitalised word after “to”
+  if (!tripDetails) return null;
+
+  // crude: look for “to X”
   const matchTo = tripDetails.match(/to\s+([A-Z][a-zA-Z\s]+)/);
   if (matchTo) return matchTo[1].trim();
 
@@ -532,24 +538,35 @@ function detectMainDestination(tripDetails) {
   const matchCity = tripDetails.match(/([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)/);
   if (matchCity) return matchCity[1].trim();
 
-  return "Australia"; // very rough default for now
+  return null;
 }
 
-// NEW itinerary text generator – uses placeholders then swaps for real URLs
+// ===== NEW itinerary text generator – placeholders → real affiliate URLs =====
 async function generateItineraryText(tripDetails) {
   try {
-    const mainDestination = detectMainDestination(tripDetails || "");
+    const details = tripDetails || "";
 
-    // If you want to keep it simple: just 1 city for now
-    const cities = [mainDestination || "Australia"];
+    // 1) Find all relevant cities from the request
+    let cities = extractCitiesFromText(details);
 
-    // Build placeholder map
+    // 2) Also detect main destination and ensure it is included
+    const mainDestination = detectMainDestination(details);
+    if (mainDestination && !cities.includes(mainDestination)) {
+      cities.push(mainDestination);
+    }
+
+    // 3) Fallback if nothing detected
+    if (!cities.length) {
+      cities.push("Australia");
+    }
+
+    // 4) Build placeholder map
     const viatorPlaceholdersByCity = buildViatorPlaceholderMap(cities);
 
-    // Build prompt
+    // 5) Build prompt
     const prompt = buildItineraryPrompt({
       mode: "new",
-      tripDetails,
+      tripDetails: details,
       viatorPlaceholdersByCity,
     });
 
@@ -572,7 +589,7 @@ async function generateItineraryText(tripDetails) {
 
     text = text.trim();
 
-    // === POST-PROCESS: replace placeholders with real affiliate URLs ===
+    // 6) POST-PROCESS: replace placeholders with real affiliate URLs for each city
     for (const city of cities) {
       const placeholders = viatorPlaceholdersByCity[city];
       if (!placeholders) continue;
@@ -607,17 +624,29 @@ async function generateItineraryText(tripDetails) {
   }
 }
 
-// UPDATED itinerary text generator – uses placeholders then swaps for real URLs
+// ===== UPDATED itinerary text generator – placeholders → real affiliate URLs =====
 async function generateUpdatedItineraryText({
   originalItineraryText,
   editRequestText,
   latestTripDetails,
 }) {
   try {
-    const tripDetails = latestTripDetails || editRequestText || "";
+    const tripDetails =
+      latestTripDetails || editRequestText || originalItineraryText || "";
 
+    // 1) Gather cities from the most up-to-date description
+    let cities = extractCitiesFromText(tripDetails);
+
+    // 2) Ensure main destination is included as well
     const mainDestination = detectMainDestination(tripDetails);
-    const cities = [mainDestination || "Australia"];
+    if (mainDestination && !cities.includes(mainDestination)) {
+      cities.push(mainDestination);
+    }
+
+    // 3) Fallback if still empty
+    if (!cities.length) {
+      cities.push("Australia");
+    }
 
     const viatorPlaceholdersByCity = buildViatorPlaceholderMap(cities);
 
@@ -683,7 +712,7 @@ async function generateUpdatedItineraryText({
   }
 }
 
-async function generateTripInspiration(preferences, from) {
+async function generateTripInspiration(preferences) {
   try {
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
@@ -807,9 +836,8 @@ app.post("/paystack/webhook", async (req, res) => {
           let itineraryText;
           try {
             const tripDetails = details || `Trip to ${dest}`;
-            const { itineraryText: generatedText } = await generateItineraryText(
-              tripDetails
-            );
+            const { itineraryText: generatedText } =
+              await generateItineraryText(tripDetails);
             itineraryText = generatedText;
           } catch (genErr) {
             console.error("Error generating AI itinerary, using fallback:", genErr);
@@ -1165,7 +1193,7 @@ app.post("/webhook", async (req, res) => {
       case "ASK_TRIP_INSPIRATION": {
         const prefs = body; // user’s description
 
-        const ideas = await generateTripInspiration(prefs, from);
+        const ideas = await generateTripInspiration(prefs);
 
         await sendWhatsApp(
           from,
@@ -1183,7 +1211,7 @@ app.post("/webhook", async (req, res) => {
       case "ASK_TRAVEL_QUESTION": {
         const question = body;
 
-        const answer = await generateTravelAnswer(question, from);
+        const answer = await generateTravelAnswer(question);
 
         await sendWhatsApp(
           from,
