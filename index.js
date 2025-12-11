@@ -165,15 +165,26 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
     .replace("whatsapp:", "")
     .replace(/[^\d]/g, "");
 
-  // Use a valid-looking domain
+  // Use a valid-looking domain for Paystack's required email
   const customerEmail = `wa${phoneDigits || "guest"}@huguadventures.com`;
 
   const reference = `ITIN_${itineraryRequestId}_${Date.now()}`;
 
-  const callbackUrl =
-    process.env.PAYSTACK_CALLBACK_URL ||
-    getWhatsappDeepLink() ||
-    "https://huguadventures.com/itinerary/thanks"; // last fallback
+  // Deep link back into WhatsApp after payment
+  // If you want to override this, set PAYSTACK_CALLBACK_URL in your .env
+  let callbackUrl = process.env.PAYSTACK_CALLBACK_URL;
+  if (!callbackUrl) {
+    // Default: open a chat with your Twilio WhatsApp number and pre-fill a message
+    // e.g. https://wa.me/14155238886?text=I%20have%20completed%20payment
+    if (TWILIO_NUMBER && TWILIO_NUMBER.startsWith("whatsapp:+")) {
+      const waNumber = TWILIO_NUMBER.replace("whatsapp:+", "");
+      const encodedMsg = encodeURIComponent("I have completed payment for my itinerary");
+      callbackUrl = `https://wa.me/${waNumber}?text=${encodedMsg}`;
+    } else {
+      // Last-resort fallback – your site "thanks" page if you have one
+      callbackUrl = "https://huguadventures.com/thanks-itinerary-payment";
+    }
+  }
 
   const payload = {
     amount: itineraryAmountSmallest, // already in smallest unit
@@ -188,12 +199,16 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
     callback_url: callbackUrl,
   };
 
-  const res = await axios.post(`${paystackBase}/transaction/initialize`, payload, {
-    headers: {
-      Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-      "Content-Type": "application/json",
-    },
-  });
+  const res = await axios.post(
+    `${paystackBase}/transaction/initialize`,
+    payload,
+    {
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
 
   const data = res.data;
   if (!data.status) {
@@ -241,20 +256,30 @@ const VIATOR_AFFILIATE_PARAMS =
 const VIATOR_CURRENCY = process.env.VIATOR_CURRENCY || "USD";
 
 // Single source of truth for Viator links
-function buildTourLinks(city) {
-  const query = encodeURIComponent(city);
+// ===== AFFILIATE LINK HELPERS =====
+
+// Viator / tours links
+function buildTourLinks(destination) {
+  const encoded = encodeURIComponent((destination || "").trim());
+
+  // Configure via env to keep links consistent everywhere
   const base =
-    process.env.VIATOR_BASE_URL ||
-    "https://www.viator.com/searchResults/all";
+    process.env.VIATOR_AFFILIATE_BASE ||
+    "https://www.viator.com/searchResults/all?text=";
 
-  const common = `text=${query}&${VIATOR_AFFILIATE_PARAMS}&currency=${VIATOR_CURRENCY}`;
+  // Example suffix you can use in .env:
+  // VIATOR_AFFILIATE_SUFFIX=&pid=P00240917&uid=U00642340&mcid=58086&currency=USD
+  const suffix = process.env.VIATOR_AFFILIATE_SUFFIX || "";
 
-  return {
-    city,
-    searchUrl: `${base}?${common}`,
-    recommendedUrl: `${base}?${common}&sort=RECOMMENDED`,
-  };
+  // Base search URL (monetised)
+  const search_url = `${base}${encoded}${suffix}`;
+
+  // Recommended sort variant (still monetised)
+  const recommended_url = `${base}${encoded}${suffix}&sort=RECOMMENDED`;
+
+  return { search_url, recommended_url };
 }
+
 
 // (Legacy helper – not used at runtime, kept for future re-use)
 function buildViatorLinksBlock(keyCities) {
@@ -672,6 +697,56 @@ async function generateTripInspiration(preferences) {
 
 // ===== PDF + S3 HELPERS =====
 
+// Light-weight city detection for PDF linking – extend as you wish
+const PDF_CITY_KEYWORDS = [
+  // Australia
+  "Sydney",
+  "Melbourne",
+  "Cairns",
+  "Brisbane",
+  "Perth",
+  "Adelaide",
+  "Darwin",
+  "Hobart",
+  "Gold Coast",
+  "Byron Bay",
+  "Canberra",
+  "Great Ocean Road",
+  "Blue Mountains",
+  "Barossa Valley",
+  "Rottnest Island",
+  // East Africa (for your Kenya itineraries, etc.)
+  "Nairobi",
+  "Amboseli",
+  "Maasai Mara",
+  "Mombasa",
+  "Diani",
+  "Watamu",
+  "Malindi",
+  "Naivasha",
+  "Nakuru",
+];
+
+function findCityInLine(line) {
+  if (!line) return null;
+  for (const name of PDF_CITY_KEYWORDS) {
+    if (line.toLowerCase().includes(name.toLowerCase())) {
+      return name;
+    }
+  }
+  return null;
+}
+
+function getDefaultCityFromTitle(title) {
+  if (!title) return null;
+  // e.g. "Updated itinerary for Sydney & East Coast (27 days)"
+  const m = title.match(/for\s+(.+)/i);
+  if (m) {
+    return m[1].trim().replace(/\.$/, "");
+  }
+  return null;
+}
+
 function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
   return new Promise((resolve, reject) => {
     try {
@@ -682,12 +757,92 @@ function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      doc.fontSize(20).text(title, { align: "center" });
-      doc.moveDown();
+      const defaultCity = getDefaultCityFromTitle(title) || "Your Trip";
 
-      doc.fontSize(11).text(itineraryText, {
-        align: "left",
-      });
+      // --- Header ---
+      doc.font("Helvetica-Bold")
+        .fontSize(18)
+        .fillColor("#333333")
+        .text(title, { align: "center" });
+
+      doc.moveDown(0.3);
+
+      doc.font("Helvetica")
+        .fontSize(10)
+        .fillColor("#777777")
+        .text(`Hugu Adventures · ${defaultCity}`, { align: "center" });
+
+      doc.moveDown(1.0);
+
+      // --- Body ---
+      const lines = (itineraryText || "").split(/\r?\n/);
+
+      let currentCity = defaultCity;
+      doc.font("Helvetica").fontSize(11).fillColor("#000000");
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+          doc.moveDown(0.4);
+          continue;
+        }
+
+        // Update "current city" whenever we see one in this line
+        const cityInLine = findCityInLine(trimmed);
+        if (cityInLine) {
+          currentCity = cityInLine;
+        }
+
+        // Detect Day headings like "Day 7: Flight to Melbourne – Culture Capital"
+        if (/^Day\s+\d+:/i.test(trimmed)) {
+          doc.moveDown(0.6);
+          doc.font("Helvetica-Bold").fontSize(13).fillColor("#222222");
+          doc.text(trimmed, { align: "left" });
+          doc.moveDown(0.3);
+          doc.font("Helvetica").fontSize(11).fillColor("#000000");
+          continue;
+        }
+
+        // Detect our "Book Tour Here" lines and attach a proper affiliate link
+        if (/^\[Book Tour Here\]/i.test(trimmed)) {
+          const cityForLink = currentCity || defaultCity || "Australia";
+          const { recommended_url, search_url } =
+            buildTourLinks(cityForLink) || {};
+          const url =
+            recommended_url || search_url || "https://www.viator.com/searchResults/all";
+
+          doc.moveDown(0.3);
+          doc.font("Helvetica-Bold").fontSize(11).fillColor("#0056b3");
+
+          // Clickable link annotation – the viewer will use the full URL (no more truncation at '?')
+          doc.text(`Book tours in ${cityForLink}`, {
+            link: url,
+            underline: true,
+          });
+
+          doc.font("Helvetica").fontSize(11).fillColor("#000000");
+          continue;
+        }
+
+        // Generic text line
+        doc.text(trimmed, {
+          align: "left",
+          lineGap: 4,
+        });
+        doc.moveDown(0.1);
+      }
+
+      // --- Simple footer "feel" at the end of the document ---
+      doc.moveDown(1.0);
+      doc.font("Helvetica")
+        .fontSize(9)
+        .fillColor("#777777")
+        .text(
+          `Prepared by Hugu Adventures · ${defaultCity}`,
+          { align: "center" }
+        );
 
       doc.end();
     } catch (err) {
