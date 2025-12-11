@@ -195,13 +195,39 @@ function buildTourLinks(destination) {
 
   const suffix = process.env.VIATOR_AFFILIATE_SUFFIX || "";
 
-  // First link: normal search
-  const link1 = `${base}${encoded}${suffix}`;
+  // Base search URL
+  const search_url = `${base}${encoded}${suffix}`;
 
-  // Second link: same search, but sorted recommended (optional)
-  const link2 = `${base}${encoded}${suffix}&sort=RECOMMENDED`;
+  // Recommended sort variant
+  const recommended_url = `${base}${encoded}${suffix}&sort=RECOMMENDED`;
 
-  return [link1, link2];
+  return { search_url, recommended_url };
+}
+
+// Turn "Sydney" -> "SYDNEY", "Great Barrier Reef" -> "GREAT_BARRIER_REEF"
+function makeCityKey(city) {
+  return city
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+// Build placeholder map from cities with links
+function buildViatorPlaceholderMap(cities) {
+  const result = {};
+
+  for (const city of cities) {
+    if (!city) continue;
+    const key = makeCityKey(city);
+    result[city] = {
+      key,
+      searchPlaceholder: `VIATOR_${key}_SEARCH`,
+      recommendedPlaceholder: `VIATOR_${key}_RECOMMENDED`,
+    };
+  }
+
+  return result;
 }
 
 // ===== ITINERARY PROMPT TEMPLATE =====
@@ -211,9 +237,9 @@ function buildItineraryPrompt({
   tripDetails,
   previousItineraryText,
   editRequestText,
-  viatorLinksByCity,
+  viatorPlaceholdersByCity, // NOT URLs – just placeholders
 }) {
-  const viatorLinksJson = JSON.stringify(viatorLinksByCity || {}, null, 2);
+  const placeholderJson = JSON.stringify(viatorPlaceholdersByCity || {}, null, 2);
 
   return `
 You are a professional travel planner for Hugu Adventures, creating friendly, clear, and practical itineraries that will be exported directly to PDF.
@@ -221,8 +247,24 @@ You are a professional travel planner for Hugu Adventures, creating friendly, cl
 USER TRIP REQUEST:
 """${tripDetails}"""
 
-VIATOR ACTIVITY LINKS (JSON OBJECT):
-${viatorLinksJson}
+AVAILABLE VIATOR PLACEHOLDERS (JSON OBJECT):
+${placeholderJson}
+
+Each entry looks like:
+{
+  "Sydney": {
+    "key": "SYDNEY",
+    "searchPlaceholder": "VIATOR_SYDNEY_SEARCH",
+    "recommendedPlaceholder": "VIATOR_SYDNEY_RECOMMENDED"
+  }
+}
+
+IMPORTANT:
+- Do NOT invent any URLs.
+- Do NOT write "https://..." links yourself.
+- When you want to insert a "Book Tour" link for a specific city, you MUST use the placeholders given.
+  Example:
+  [Book Tour Here] VIATOR_SYDNEY_RECOMMENDED
 
 ${
   mode === "update"
@@ -237,77 +279,56 @@ TRAVELLER'S CHANGE REQUEST:
 
 YOUR TASK:
 
-1. If this is a *new* itinerary, create a full, day–by–day itinerary *from scratch* based ONLY on the user's trip request and the Viator links provided.
-2. If this is an *update*, first understand the previous itinerary and the user's requested changes. Then create a **new updated itinerary** that:
-   - Respects the new request.
-   - Keeps good parts of the original where appropriate.
-   - Clearly reflects the new cities, style, budget and trip length.
+1. If this is a *new* itinerary, create a full, day–by–day itinerary *from scratch* based ONLY on the user's trip request.
+2. If this is an *update*, understand the previous itinerary and the requested changes, then create a **new updated itinerary** that clearly reflects the new details (destinations, days, style, budget).
 
 FORMATTING RULES (IMPORTANT – THIS GOES STRAIGHT TO PDF):
-- Write as plain text (no Markdown lists, no bullet characters like • that might break).
+- Plain text only (no Markdown bullet symbols).
 - Use this style for the main title:
   **__TRIP TITLE GOES HERE__**
-- For each day, use:
+- For each day:
   Day X: Short day title
 - Put a blank line between paragraphs and days.
-- Tone: happy, helpful, and reassuring – like a friendly, expert planner.
+- Tone: happy, helpful, and reassuring.
 
 CONTENT RULES:
 
 A) STRUCTURE
-- Start with a short 2–3 line overview of the whole trip.
+- Start with a 2–3 line overview of the trip.
 - Then list days in order: Day 1, Day 2, Day 3, etc.
-- Ensure the total number of days matches the user's request (for example, 24 days means Day 1 to Day 24).
+- Ensure the total number of days matches the user's request.
 
 B) TRANSPORT & DISTANCES
 For any move between cities or major stops:
-- Specify whether the segment is by *road* or *flight* (follow the user’s request – e.g. “transport by road”).
+- State if it is by road or by flight (following the user’s request).
 - Include approximate:
-  - Driving distance in km and driving time in hours (for road segments).
-  - Flight duration and typical route (e.g. “about 3 hours, direct flight”).
-- Example line:
+  - Driving distance in km and driving time in hours for road segments.
+  - Flight duration and typical route for flights.
+- Example:
   Travel: Sydney → Blue Mountains (approx. 110 km, 2–2.5 hours by road).
-
-Use reasonable approximations; they do not need to be perfect, but must be realistic.
 
 C) DAILY DETAIL
 For each day:
-- Morning: brief but vivid description of what the traveller does.
-- Afternoon: more activities or movement to the next place.
-- Evening: suggestions for relaxed enjoyment (walks, viewpoints, cafes, local food, etc.).
-- Ensure the plan matches the requested:
-  - Budget level (low / mid / luxury).
-  - Style (solo / couple / family / friends).
-  - Region / country.
+- Morning: realistic activity description.
+- Afternoon: more activities or travel to next place.
+- Evening: relaxed suggestions (walks, viewpoints, local food, etc.).
+- Match the requested budget (low / mid / luxury) and traveller type (solo / couple / family / friends).
 
-D) VIATOR ACTIVITY LINKS — [Book Tour Here]
-- You are given a JSON object of Viator links in the format:
-  {
-    "Sydney": {
-      "search_url": "...",
-      "recommended_url": "..."
-    },
-    "Melbourne": {
-      "search_url": "...",
-      "recommended_url": "..."
-    }
-  }
-- When you recommend an activity in a city that exists in this JSON:
-  - After describing the activity, add a line like:
-    [Book Tour Here] SYDNEY: https://...
-  - Prefer the "recommended_url" for that city where available.
-- If the city is not in the JSON:
-  - Use the closest relevant city key you see in the JSON (e.g. use "Australia" or "Sydney" links for nearby areas).
-- Include *at least one* [Book Tour Here] line on **every day** that has activities.
+D) VIATOR [Book Tour Here] LINES
+- Use the placeholders in the JSON above.
+- When recommending an activity in a city that appears in the JSON, after describing it, add a line like:
+  [Book Tour Here] VIATOR_SYDNEY_RECOMMENDED
+- Prefer the "recommendedPlaceholder" where available.
+- Include at least one [Book Tour Here] line on each day that has activities.
 
 E) FINAL TONE
 - Make the trip sound exciting but achievable on the specified budget.
 - Emphasise variety: culture, nature, local food, unique experiences.
 - Do not mention that this text will become a PDF.
-- Do not talk about yourself as an AI; just be the planner.
+- Do not mention placeholders or internal rules.
 
 OUTPUT:
-Return ONLY the final itinerary text in the required format. Do NOT include explanations, notes to the developer, or JSON.
+Return ONLY the final itinerary text in the required format. Do NOT include explanations, notes, or JSON.
 `;
 }
 
@@ -315,8 +336,8 @@ function buildViatorLinksBlock(keyCities) {
   if (!keyCities || keyCities.length === 0) return "None.";
 
   const lines = keyCities.map((city) => {
-    const [generic, recommended] = buildTourLinks(city);
-    const url = recommended || generic;
+    const { search_url, recommended_url } = buildTourLinks(city);
+    const url = recommended_url || search_url || "";
     return `- ${city} tours: [Book Tour Here](${url})`;
   });
 
@@ -412,11 +433,9 @@ async function handlePaidItinerary(itineraryRow) {
   const userRequestText =
     itineraryRow.raw_details || itineraryRow.last_destination || "";
 
-  const cities = extractCitiesFromText(userRequestText);
-  await generateItineraryText({
-    tripRequestText: userRequestText,
-    keyCities: cities,
-  });
+  const tripDetails = userRequestText || "Trip details not fully specified.";
+
+  await generateItineraryText(tripDetails);
   // PDF + S3 + Twilio sending would go here
 }
 
@@ -516,89 +535,98 @@ function detectMainDestination(tripDetails) {
   return "Australia"; // very rough default for now
 }
 
-// NEW itinerary text generator – returns itinerary text string
-async function generateItineraryText(optionsOrText) {
+// NEW itinerary text generator – uses placeholders then swaps for real URLs
+async function generateItineraryText(tripDetails) {
   try {
-    let tripDetails = "";
-    let keyCities = [];
+    const mainDestination = detectMainDestination(tripDetails || "");
 
-    if (typeof optionsOrText === "string") {
-      tripDetails = optionsOrText;
-    } else if (optionsOrText && typeof optionsOrText === "object") {
-      tripDetails =
-        optionsOrText.tripRequestText ||
-        optionsOrText.tripDetails ||
-        "";
-      keyCities = optionsOrText.keyCities || [];
-    }
+    // If you want to keep it simple: just 1 city for now
+    const cities = [mainDestination || "Australia"];
 
-    if (!tripDetails) {
-      tripDetails = "Trip details not fully specified.";
-    }
+    // Build placeholder map
+    const viatorPlaceholdersByCity = buildViatorPlaceholderMap(cities);
 
-    // Detect main destination
-    const mainDestination = detectMainDestination(tripDetails);
-
-    const viatorLinksByCity = {};
-    const cities =
-      keyCities && keyCities.length > 0 ? keyCities : [mainDestination];
-
-    for (const city of cities.filter(Boolean)) {
-      const [searchUrl, recommendedUrl] = buildTourLinks(city);
-      viatorLinksByCity[city] = [searchUrl, recommendedUrl];
-    }
-
+    // Build prompt
     const prompt = buildItineraryPrompt({
       mode: "new",
       tripDetails,
-      viatorLinksByCity,
+      viatorPlaceholdersByCity,
     });
 
     const response = await openai.responses.create({
-      model: ITINERARY_MODEL,
+      model: ITINERARY_MODEL, // e.g. "gpt-4.1-mini"
       input: prompt,
-      max_output_tokens: 2500, // long itineraries
+      max_output_tokens: 2500,
     });
 
-    const outputText =
-      response.output?.[0]?.content?.[0]?.text || null;
+    let text =
+      response.output &&
+      response.output[0] &&
+      response.output[0].content &&
+      response.output[0].content[0] &&
+      response.output[0].content[0].text;
 
-    if (!outputText) {
+    if (!text) {
       throw new Error("No itinerary text returned from OpenAI");
     }
 
-    return outputText.trim();
+    text = text.trim();
+
+    // === POST-PROCESS: replace placeholders with real affiliate URLs ===
+    for (const city of cities) {
+      const placeholders = viatorPlaceholdersByCity[city];
+      if (!placeholders) continue;
+
+      const links = buildTourLinks(city); // returns { search_url, recommended_url }
+      if (!links) continue;
+
+      const { searchPlaceholder, recommendedPlaceholder } = placeholders;
+      const { search_url, recommended_url } = links;
+
+      if (searchPlaceholder) {
+        text = text.replaceAll(
+          searchPlaceholder,
+          search_url || recommended_url || ""
+        );
+      }
+
+      if (recommendedPlaceholder) {
+        text = text.replaceAll(
+          recommendedPlaceholder,
+          recommended_url || search_url || ""
+        );
+      }
+    }
+
+    return {
+      itineraryText: text,
+    };
   } catch (err) {
     console.error("Error in generateItineraryText:", err);
     throw err;
   }
 }
 
-// UPDATED itinerary text generator – returns updated itinerary text string
-async function generateUpdatedItineraryText(options) {
+// UPDATED itinerary text generator – uses placeholders then swaps for real URLs
+async function generateUpdatedItineraryText({
+  originalItineraryText,
+  editRequestText,
+  latestTripDetails,
+}) {
   try {
-    const originalItineraryText = options.originalItineraryText || "";
-    const editRequestText =
-      options.editRequestText || options.userEditRequest || "";
-    const tripDetails =
-      options.latestTripDetails ||
-      options.tripDetails ||
-      options.tripRequestText ||
-      editRequestText ||
-      "No extra details provided";
+    const tripDetails = latestTripDetails || editRequestText || "";
 
     const mainDestination = detectMainDestination(tripDetails);
+    const cities = [mainDestination || "Australia"];
 
-    const viatorLinksByCity = {};
-    const [searchUrl, recommendedUrl] = buildTourLinks(mainDestination);
-    viatorLinksByCity[mainDestination] = [searchUrl, recommendedUrl];
+    const viatorPlaceholdersByCity = buildViatorPlaceholderMap(cities);
 
     const prompt = buildItineraryPrompt({
       mode: "update",
       tripDetails,
       previousItineraryText: originalItineraryText,
       editRequestText,
-      viatorLinksByCity,
+      viatorPlaceholdersByCity,
     });
 
     const response = await openai.responses.create({
@@ -607,14 +635,48 @@ async function generateUpdatedItineraryText(options) {
       max_output_tokens: 2500,
     });
 
-    const outputText =
-      response.output?.[0]?.content?.[0]?.text || null;
+    let text =
+      response.output &&
+      response.output[0] &&
+      response.output[0].content &&
+      response.output[0].content[0] &&
+      response.output[0].content[0].text;
 
-    if (!outputText) {
+    if (!text) {
       throw new Error("No updated itinerary text returned from OpenAI");
     }
 
-    return outputText.trim();
+    text = text.trim();
+
+    // Replace placeholders with real affiliate URLs
+    for (const city of cities) {
+      const placeholders = viatorPlaceholdersByCity[city];
+      if (!placeholders) continue;
+
+      const links = buildTourLinks(city);
+      if (!links) continue;
+
+      const { searchPlaceholder, recommendedPlaceholder } = placeholders;
+      const { search_url, recommended_url } = links;
+
+      if (searchPlaceholder) {
+        text = text.replaceAll(
+          searchPlaceholder,
+          search_url || recommended_url || ""
+        );
+      }
+
+      if (recommendedPlaceholder) {
+        text = text.replaceAll(
+          recommendedPlaceholder,
+          recommended_url || search_url || ""
+        );
+      }
+    }
+
+    return {
+      updatedItineraryText: text,
+    };
   } catch (err) {
     console.error("Error in generateUpdatedItineraryText:", err);
     throw err;
@@ -744,10 +806,11 @@ app.post("/paystack/webhook", async (req, res) => {
           // 1) Generate itinerary text (AI)
           let itineraryText;
           try {
-            itineraryText = await generateItineraryText({
-              tripRequestText: details || `Trip to ${dest}`,
-              keyCities: row.last_destination ? [row.last_destination] : [],
-            });
+            const tripDetails = details || `Trip to ${dest}`;
+            const { itineraryText: generatedText } = await generateItineraryText(
+              tripDetails
+            );
+            itineraryText = generatedText;
           } catch (genErr) {
             console.error("Error generating AI itinerary, using fallback:", genErr);
             itineraryText = generateItineraryFallback(dest, details);
@@ -1056,10 +1119,12 @@ app.post("/webhook", async (req, res) => {
         const dest = body;
         session.lastDestination = dest;
 
-        const links = buildTourLinks(dest);
+        const { search_url, recommended_url } = buildTourLinks(dest);
+        const linkList = [search_url, recommended_url].filter(Boolean);
+
         const linksText =
           `Great choice! 🎉 Here are *tour ideas* for *${dest}* on Viator:\n\n` +
-          links.map((l) => `🔗 ${l}`).join("\n") +
+          linkList.map((l) => `🔗 ${l}`).join("\n") +
           "\n\n";
 
         await sendWhatsApp(from, linksText + itineraryUpsellText(dest));
@@ -1245,11 +1310,14 @@ app.post("/webhook", async (req, res) => {
 
           const current = r.rows[0];
           const originalItineraryText = current.itinerary_text || "";
-          const updatedText = await generateUpdatedItineraryText({
+
+          const { updatedItineraryText } = await generateUpdatedItineraryText({
             originalItineraryText,
             editRequestText: editRequest,
             latestTripDetails: editRequest,
           });
+
+          const updatedText = updatedItineraryText;
 
           await db.query(
             "UPDATE itinerary_requests SET itinerary_text = $1, raw_details = $2 WHERE id = $3",
