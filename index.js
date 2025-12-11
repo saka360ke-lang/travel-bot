@@ -232,6 +232,72 @@ function makeCityKey(city) {
     .replace(/^_+|_+$/g, "");
 }
 
+// ===== Viator API helper (Basic Access) =====
+
+// Call Viator's Partner API to fetch top tours for a city / keyword
+// NOTE: You MUST plug in the correct endpoint and response fields from the Viator docs/Postman.
+async function fetchViatorTopToursForCity(city, options = {}) {
+  if (!VIATOR_API_KEY) {
+    console.warn("VIATOR_API_KEY not set; skipping Viator API call.");
+    return [];
+  }
+
+  const {
+    limit = 5,        // how many tours to return
+    currency = "USD", // adjust if needed
+    sort = "RECOMMENDED",
+  } = options;
+
+  const base = VIATOR_API_BASE || "https://api.viator.com/partner"; // adjust per docs
+
+  try {
+    // TODO: Replace this path + method with the exact one from Viator docs.
+    // Examples in docs usually have something like /v1/products/search or /search/freetext.
+    const url = `${base}/v1/products/search`;
+
+    const payload = {
+      // These field names MUST be matched to the docs.
+      // Common patterns are: "text", "query", "searchTerm" etc.
+      text: city,
+      sort,
+      currency,
+      // You may need a different key than "count" – check docs.
+      count: limit,
+    };
+
+    const response = await axios.post(url, payload, {
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "X-API-Key": VIATOR_API_KEY,
+      },
+    });
+
+    const data = response.data || {};
+
+    // TODO: Inspect the actual response and adjust.
+    // Many Viator responses look like { data: [ { productCode, title, webURL, ... }, ... ] }
+    const products = data.data || data.products || [];
+
+    // Normalize into a simple array we can use later
+    return products.map((p) => ({
+      raw: p,
+      // Adjust the field names once you see a real response:
+      title: p.title || p.name || "",
+      // Often this is something like p.webURL or p.productUrl:
+      url: p.webURL || p.productUrl || "",
+      code: p.productCode || p.code || "",
+    }));
+  } catch (err) {
+    console.error(
+      "Error calling Viator API for city",
+      city,
+      err.response?.data || err.message
+    );
+    return [];
+  }
+}
+
 // Build placeholder map from cities (still useful if you ever want placeholders)
 function buildViatorPlaceholderMap(cities) {
   const result = {};
@@ -258,9 +324,23 @@ const VIATOR_CURRENCY = process.env.VIATOR_CURRENCY || "USD";
 // Single source of truth for Viator links
 // ===== AFFILIATE LINK HELPERS =====
 
-// Viator / tours links
-function buildTourLinks(destination) {
-  const encoded = encodeURIComponent((destination || "").trim());
+// ===== Affiliate search links (current working approach) =====
+
+function buildTourLinks(city) {
+  const baseUrl = "https://www.viator.com/searchResults/all";
+  const encodedCity = encodeURIComponent(city.trim());
+  const suffix = VIATOR_AFFILIATE_SUFFIX || "";
+
+  // Example full suffix (in .env):
+  // VIATOR_AFFILIATE_SUFFIX=&pid=P00240917&uid=U00642340&mcid=58086&currency=USD
+  // NOTE: suffix MUST start with "&", not "?".
+
+  const searchUrl = `${baseUrl}?text=${encodedCity}${suffix}`;
+  const recommendedUrl = `${baseUrl}?text=${encodedCity}${suffix}&sort=RECOMMENDED`;
+
+  return { searchUrl, recommendedUrl };
+}
+
 
   // Configure via env to keep links consistent everywhere
   const base =
@@ -269,7 +349,12 @@ function buildTourLinks(destination) {
 
   // Example suffix you can use in .env:
   // VIATOR_AFFILIATE_SUFFIX=&pid=P00240917&uid=U00642340&mcid=58086&currency=USD
-  const suffix = process.env.VIATOR_AFFILIATE_SUFFIX || "";
+  const {
+  // ...existing vars...
+  VIATOR_AFFILIATE_SUFFIX,
+  VIATOR_API_KEY,
+  VIATOR_API_BASE,
+} = process.env;
 
   // Base search URL (monetised)
   const search_url = `${base}${encoded}${suffix}`;
