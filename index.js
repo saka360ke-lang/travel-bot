@@ -459,8 +459,8 @@ function itineraryUpsellText(destination) {
   );
 }
 
-// ===== ITINERARY GENERATION HELPERS =====
 
+// ===== ITINERARY GENERATION HELPERS =====
 // Try to extract "X days" from user details like "6 days", "for 10 days", etc.
 function extractDaysFromDetails(details) {
   if (!details) return null;
