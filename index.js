@@ -877,73 +877,90 @@ function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      
-    // Extract a best-effort list of cities referenced in the itinerary, for header/footer branding
-    const extractedCities = [];
-    const cityRegexes = [
-      /Book tours in\s+([^\n\r]+)/gi,
-      /^\*?Day\s*\d+\s*:\s*([^\n\r]+)/gim,
-    ];
-    for (const rgx of cityRegexes) {
-      let m;
-      while ((m = rgx.exec(itineraryText)) !== null) {
-        const c = String(m[1] || "").replace(/[\*\_]+/g, "").trim();
-        if (c && c.length <= 40) extractedCities.push(c);
+      // Extract a best-effort list of cities referenced in the itinerary, for header/footer branding
+      const extractedCities = [];
+      const cityRegexes = [
+        /Book tours in\s+([^\n\r]+)/gi,
+        /^\*?Day\s*\d+\s*:\s*([^\n\r]+)/gim,
+      ];
+
+      for (const rgx of cityRegexes) {
+        let m;
+        while ((m = rgx.exec(itineraryText)) !== null) {
+          const c = String(m[1] || "").replace(/[\*\_]+/g, "").trim();
+          if (c && c.length <= 40) extractedCities.push(c);
+        }
       }
-    }
-    const uniqueCities = Array.from(new Set(extractedCities)).slice(0, 8);
-    const citiesForBranding = uniqueCities.length ? uniqueCities.join(" • ") : "Your Trip";
 
-    // Page header/footer
-    const drawHeaderFooter = () => {
-      const top = doc.page.margins.top;
-      const bottom = doc.page.height - doc.page.margins.bottom + 10;
+      const uniqueCities = Array.from(new Set(extractedCities)).slice(0, 8);
+      const citiesForBranding = uniqueCities.length ? uniqueCities.join(" • ") : "Your Trip";
 
-      doc.save();
-      doc.font("Helvetica-Bold").fontSize(10).fillColor("#111111")
-        .text(`Hugu Adventures · Custom Itinerary`, doc.page.margins.left, 18, { align: "left" });
-      doc.font("Helvetica").fontSize(9).fillColor("#555555")
-        .text(citiesForBranding, doc.page.margins.left, 32, { align: "left" });
+      // Page header/footer
+      const drawHeaderFooter = () => {
+        const bottom = doc.page.height - doc.page.margins.bottom + 10;
 
-      doc.font("Helvetica").fontSize(8).fillColor("#777777")
-        .text(`Page ${doc.page.number}`, doc.page.margins.left, bottom, { align: "left" });
-      doc.font("Helvetica").fontSize(8).fillColor("#777777")
-        .text(citiesForBranding, doc.page.margins.left, bottom, { align: "right" });
+        doc.save();
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(10)
+          .fillColor("#111111")
+          .text(`Hugu Adventures · Custom Itinerary`, doc.page.margins.left, 18, { align: "left" });
 
-      doc.restore();
-      doc.moveDown(2.2);
-    };
+        doc
+          .font("Helvetica")
+          .fontSize(9)
+          .fillColor("#555555")
+          .text(citiesForBranding, doc.page.margins.left, 32, { align: "left" });
 
-    drawHeaderFooter();
-    doc.on("pageAdded", () => {
+        doc
+          .font("Helvetica")
+          .fontSize(8)
+          .fillColor("#777777")
+          .text(`Page ${doc.page.number}`, doc.page.margins.left, bottom, { align: "left" });
+
+        doc
+          .font("Helvetica")
+          .fontSize(8)
+          .fillColor("#777777")
+          .text(citiesForBranding, doc.page.margins.left, bottom, { align: "right" });
+
+        doc.restore();
+        doc.moveDown(2.2);
+      };
+
       drawHeaderFooter();
-    });
+      doc.on("pageAdded", () => {
+        drawHeaderFooter();
+      });
 
-    const writeLineWithLinks = (line, opts = {}) => {
-      const s = String(line || "");
-      const urlRegex = /(https?:\/\/[^\s)\]]+)/g;
-      let lastIndex = 0;
-      let match;
-      while ((match = urlRegex.exec(s)) !== null) {
-        const before = s.slice(lastIndex, match.index);
-        const url = match[1];
+      const writeLineWithLinks = (line, opts = {}) => {
+        const s = String(line || "");
+        const urlRegex = /(https?:\/\/[^\s)\]]+)/g;
+        let lastIndex = 0;
+        let match;
 
-        if (before) doc.text(before, { continued: true, ...opts });
+        while ((match = urlRegex.exec(s)) !== null) {
+          const before = s.slice(lastIndex, match.index);
+          const url = match[1];
 
-        doc.fillColor("#0b57d0");
-        doc.text(url, { link: url, underline: true, continued: true, ...opts });
-        doc.fillColor("#000000");
+          if (before) doc.text(before, { continued: true, ...opts });
 
-        lastIndex = match.index + url.length;
-      }
-      const after = s.slice(lastIndex);
-      if (after) {
-        doc.text(after, { ...opts });
-      } else if (lastIndex > 0) {
-        doc.text("", { ...opts });
-      }
-    };
-const defaultCity = getDefaultCityFromTitle(title) || "Your Trip";
+          doc.fillColor("#0b57d0");
+          doc.text(url, { link: url, underline: true, continued: true, ...opts });
+          doc.fillColor("#000000");
+
+          lastIndex = match.index + url.length;
+        }
+
+        const after = s.slice(lastIndex);
+        if (after) {
+          doc.text(after, { ...opts });
+        } else if (lastIndex > 0) {
+          doc.text("", { ...opts });
+        }
+      };
+
+      const defaultCity = getDefaultCityFromTitle(title) || "Your Trip";
 
       // --- Header ---
       doc
