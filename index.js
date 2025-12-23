@@ -41,23 +41,6 @@ const {
   PAYSTACK_PUBLIC_KEY,
   PAYSTACK_BASE_URL,
   ITINERARY_CURRENCY,
-  // Travelpayouts (tp.media deeplinks)
-  TP_MARKER,           // e.g. 357561
-  TP_API_TOKEN,        // your Travelpayouts API token (optional until you call their APIs)
-  TP_TRS,              // optional tracking subid, e.g. 483320
-  // Travelpayouts program/campaign ids (campaign_id=...)
-  TP_AVIASALES_CAMPAIGN_ID,    // e.g. 100
-  TP_COMPENSAIR_CAMPAIGN_ID,   // e.g. 86
-  TP_TIQETS_CAMPAIGN_ID,       // e.g. 89
-  TP_KIWITAXI_CAMPAIGN_ID,     // e.g. 1
-  TP_WEGOTRIP_CAMPAIGN_ID,     // e.g. 150
-  // Travelpayouts product ids (p=...) used in tp.media links (examples: Aviasales=4114, Compensair=4129)
-  TP_AVIASALES_P,
-  TP_COMPENSAIR_P,
-  TP_TIQETS_P,
-  TP_KIWITAXI_P,
-  TP_WEGOTRIP_P,
-
 } = process.env;
 
 // Support both styles of env var naming
@@ -328,66 +311,22 @@ const VIATOR_CURRENCY = process.env.VIATOR_CURRENCY || "USD";
 
 // Single source of truth for Viator links
 // Affiliate search links (current working approach)
-
 function buildTourLinks(city) {
-  const safeCity = String(city || "").trim();
-  const base = VIATOR_AFFILIATE_BASE || "https://www.viator.com/searchResults/all";
+  const base =
+    VIATOR_AFFILIATE_BASE ||
+    "https://www.viator.com/searchResults/all?text=";
 
-  // Allow either:
-  // - VIATOR_AFFILIATE_SUFFIX="&pid=...&uid=...&mcid=...&currency=USD"
-  // - explicit env vars: VIATOR_PID, VIATOR_UID, VIATOR_MCID, VIATOR_CURRENCY
-  const suffix = (VIATOR_AFFILIATE_SUFFIX || "").replace(/^\?/, "").replace(/^&?/, "");
-  const suffixParams = new URLSearchParams(suffix);
+  const encodedCity = encodeURIComponent(city.trim());
 
-  const urlFor = (sort) => {
-    const u = new URL(base);
-    // Always set/override text query
-    u.searchParams.set("text", safeCity);
+  // Example full suffix (in .env):
+  // VIATOR_AFFILIATE_SUFFIX=&pid=P00240917&uid=U00642340&mcid=58086&currency=USD
+  // NOTE: suffix MUST start with "&", not "?".
+  const suffix = VIATOR_AFFILIATE_SUFFIX || "";
 
-    // Merge suffix params (don't overwrite explicit params already set in base URL)
-    for (const [k, v] of suffixParams.entries()) {
-      if (!u.searchParams.has(k)) u.searchParams.set(k, v);
-    }
+  const searchUrl = `${base}${encodedCity}${suffix}`;
+  const recommendedUrl = `${base}${encodedCity}${suffix}&sort=RECOMMENDED`;
 
-    // Optional explicit env fallbacks
-    if (process.env.VIATOR_PID && !u.searchParams.has("pid")) u.searchParams.set("pid", process.env.VIATOR_PID);
-    if (process.env.VIATOR_UID && !u.searchParams.has("uid")) u.searchParams.set("uid", process.env.VIATOR_UID);
-    if (process.env.VIATOR_MCID && !u.searchParams.has("mcid")) u.searchParams.set("mcid", process.env.VIATOR_MCID);
-    if (process.env.VIATOR_CURRENCY && !u.searchParams.has("currency")) u.searchParams.set("currency", process.env.VIATOR_CURRENCY);
-
-    if (sort) u.searchParams.set("sort", sort);
-
-    return u.toString();
-  };
-
-  return {
-    searchUrl: urlFor(null),
-    recommendedUrl: urlFor("RECOMMENDED"),
-  };
-}
-
-/**
- * Build a Travelpayouts deeplink (tp.media) for any provider.
- * Format example:
- * https://tp.media/r?marker=357561&trs=483320&p=4114&u=https%3A%2F%2Faviasales.com&campaign_id=100
- */
-function buildTpMediaLink({ p, campaignId, url, trs, marker }) {
-  const m = marker || TP_MARKER;
-  const t = trs || TP_TRS;
-  if (!m) throw new Error("TP_MARKER is missing (set TP_MARKER in .env / Render env).");
-  if (!p) throw new Error("Travelpayouts product id 'p' is missing.");
-  if (!campaignId) throw new Error("Travelpayouts campaign_id is missing.");
-  const target = String(url || "").trim();
-  if (!target) throw new Error("Travelpayouts target URL is missing.");
-
-  const params = new URLSearchParams();
-  params.set("marker", m);
-  if (t) params.set("trs", t);
-  params.set("p", String(p));
-  params.set("u", target); // URLSearchParams will encode automatically
-  params.set("campaign_id", String(campaignId));
-
-  return `https://tp.media/r?${params.toString()}`;
+  return { searchUrl, recommendedUrl };
 }
 
 // (Legacy helper – not used at runtime, kept for future re-use)
@@ -413,23 +352,12 @@ function buildHotelLinks(destination) {
 }
 
 // Flights links (e.g. Skyscanner/Kiwi)
-
 function buildFlightLinks(routeText) {
-  const route = String(routeText || "").trim();
-  const targetUrl = route
-    ? `https://aviasales.com/?search=${encodeURIComponent(route)}`
-    : "https://aviasales.com";
-
-  // Prefer Travelpayouts deeplink for Aviasales
-  const p = TP_AVIASALES_P || 4114;
-  const campaignId = TP_AVIASALES_CAMPAIGN_ID || 100;
-
-  try {
-    return [buildTpMediaLink({ p, campaignId, url: targetUrl })];
-  } catch (e) {
-    // Fallback: return raw target URL if TP env vars are missing
-    return [targetUrl];
-  }
+  const encoded = encodeURIComponent(routeText.trim());
+  const base =
+    FLIGHTS_BASE_URL ||
+    "https://your-flights-affiliate-search-url.com/search?route=";
+  return [`${base}${encoded}`];
 }
 
 // ===== TEXT HELPERS =====
@@ -459,8 +387,8 @@ function itineraryUpsellText(destination) {
   );
 }
 
-
 // ===== ITINERARY GENERATION HELPERS =====
+
 // Try to extract "X days" from user details like "6 days", "for 10 days", etc.
 function extractDaysFromDetails(details) {
   if (!details) return null;
@@ -877,89 +805,6 @@ function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      // Extract a best-effort list of cities referenced in the itinerary, for header/footer branding
-      const extractedCities = [];
-      const cityRegexes = [
-        /Book tours in\s+([^\n\r]+)/gi,
-        /^\*?Day\s*\d+\s*:\s*([^\n\r]+)/gim,
-      ];
-
-      for (const rgx of cityRegexes) {
-        let m;
-        while ((m = rgx.exec(itineraryText)) !== null) {
-          const c = String(m[1] || "").replace(/[\*\_]+/g, "").trim();
-          if (c && c.length <= 40) extractedCities.push(c);
-        }
-      }
-
-      const uniqueCities = Array.from(new Set(extractedCities)).slice(0, 8);
-      const citiesForBranding = uniqueCities.length ? uniqueCities.join(" • ") : "Your Trip";
-
-      // Page header/footer
-      const drawHeaderFooter = () => {
-        const bottom = doc.page.height - doc.page.margins.bottom + 10;
-
-        doc.save();
-        doc
-          .font("Helvetica-Bold")
-          .fontSize(10)
-          .fillColor("#111111")
-          .text(`Hugu Adventures · Custom Itinerary`, doc.page.margins.left, 18, { align: "left" });
-
-        doc
-          .font("Helvetica")
-          .fontSize(9)
-          .fillColor("#555555")
-          .text(citiesForBranding, doc.page.margins.left, 32, { align: "left" });
-
-        doc
-          .font("Helvetica")
-          .fontSize(8)
-          .fillColor("#777777")
-          .text(`Page ${doc.page.number}`, doc.page.margins.left, bottom, { align: "left" });
-
-        doc
-          .font("Helvetica")
-          .fontSize(8)
-          .fillColor("#777777")
-          .text(citiesForBranding, doc.page.margins.left, bottom, { align: "right" });
-
-        doc.restore();
-        doc.moveDown(2.2);
-      };
-
-      drawHeaderFooter();
-      doc.on("pageAdded", () => {
-        drawHeaderFooter();
-      });
-
-      const writeLineWithLinks = (line, opts = {}) => {
-        const s = String(line || "");
-        const urlRegex = /(https?:\/\/[^\s)\]]+)/g;
-        let lastIndex = 0;
-        let match;
-
-        while ((match = urlRegex.exec(s)) !== null) {
-          const before = s.slice(lastIndex, match.index);
-          const url = match[1];
-
-          if (before) doc.text(before, { continued: true, ...opts });
-
-          doc.fillColor("#0b57d0");
-          doc.text(url, { link: url, underline: true, continued: true, ...opts });
-          doc.fillColor("#000000");
-
-          lastIndex = match.index + url.length;
-        }
-
-        const after = s.slice(lastIndex);
-        if (after) {
-          doc.text(after, { ...opts });
-        } else if (lastIndex > 0) {
-          doc.text("", { ...opts });
-        }
-      };
-
       const defaultCity = getDefaultCityFromTitle(title) || "Your Trip";
 
       // --- Header ---
@@ -1041,7 +886,7 @@ function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
         }
 
         // Generic text line
-        writeLineWithLinks(cleanedHeading === trimmed ? trimmed : cleanedHeading, {
+        doc.text(cleanedHeading === trimmed ? trimmed : cleanedHeading, {
           align: "left",
           lineGap: 4,
         });
@@ -1054,7 +899,7 @@ function generateItineraryPdfBuffer(itineraryText, title = "Trip Itinerary") {
         .font("Helvetica")
         .fontSize(9)
         .fillColor("#777777")
-        .text(`Prepared by Hugu Adventures · ${citiesForBranding}`, {
+        .text(`Prepared by Hugu Adventures · ${defaultCity}`, {
           align: "center",
         });
 
