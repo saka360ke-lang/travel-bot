@@ -37,6 +37,14 @@ const {
   BOOKING_BASE_URL,
   FLIGHTS_BASE_URL,
   // Paystack
+  // Travelpayouts
+  TRAVELPAYOUTS_PARTNER_ID,
+  TRAVELPAYOUTS_API_TOKEN,
+  // Optional: tp.media program params for a Tours provider you activate in Travelpayouts
+  TRAVELPAYOUTS_TOURS_PROGRAM_ID,
+  TRAVELPAYOUTS_TOURS_TRS,
+
+  // Paystack
   PAYSTACK_SECRET_KEY,
   PAYSTACK_PUBLIC_KEY,
   PAYSTACK_BASE_URL,
@@ -150,20 +158,25 @@ async function createItineraryPayment(whatsappNumber, itineraryRequestId) {
 
   // Deep link back into WhatsApp after payment
   // If you want to override this, set PAYSTACK_CALLBACK_URL in your .env
-  let callbackUrl = process.env.PAYSTACK_CALLBACK_URL;
+  let   callbackUrl = process.env.PAYSTACK_CALLBACK_URL;
+
+  // Guardrail: some hosts auto-park domains (e.g., "ww25.your-domain.com") and you do NOT want Paystack redirecting there.
+  // If the env var looks like a parked/placeholder domain, ignore it and default to WhatsApp deep-link back to chat.
+  if (callbackUrl && /your-domain\.com/i.test(callbackUrl)) {
+    callbackUrl = null;
+  }
+
   if (!callbackUrl) {
-    // Default: open a chat with your Twilio WhatsApp number and pre-fill a message
-    // e.g. https://wa.me/14155238886?text=I%20have%20completed%20payment
-    if (TWILIO_NUMBER && TWILIO_NUMBER.startsWith("whatsapp:+")) {
-      const waNumber = TWILIO_NUMBER.replace("whatsapp:+", "");
-      const encodedMsg = encodeURIComponent(
-        "I have completed payment for my itinerary"
-      );
-      callbackUrl = `https://wa.me/${waNumber}?text=${encodedMsg}`;
+    // Take user back to WhatsApp chat after payment (success or failure).
+    // Paystack will append trxref/reference on redirect; WhatsApp ignores unknown query params.
+    const waRaw = (TWILIO_WHATSAPP_NUMBER || "").replace(/^whatsapp:/, "");
+    if (waRaw) {
+      callbackUrl = `https://wa.me/${waRaw}`;
     } else {
-      // Last-resort fallback – your site "thanks" page if you have one
+      // Fallback to a generic thanks page on your domain (if WA number not available)
       callbackUrl = "https://huguadventures.com/thanks-itinerary-payment";
     }
+  }
   }
 
   const payload = {
@@ -312,22 +325,48 @@ const VIATOR_CURRENCY = process.env.VIATOR_CURRENCY || "USD";
 // Single source of truth for Viator links
 // Affiliate search links (current working approach)
 function buildTourLinks(city) {
-  const base =
+  // Tours & Activities links.
+  //
+  // Default behaviour: Viator affiliate search links (works well for broad destination queries).
+  // Optional behaviour: if you activate a Tours provider in Travelpayouts that supports tp.media
+  // tracking links, set TRAVELPAYOUTS_TOURS_PROGRAM_ID (p) and TRAVELPAYOUTS_TOURS_TRS (trs)
+  // to generate Travelpayouts-tracked deep links instead.
+  const query = (city || "").trim();
+  if (!query) return [];
+
+  // --- 1) Build a "destination search" URL (target URL) ---
+  const viatorBase =
     VIATOR_AFFILIATE_BASE ||
     "https://www.viator.com/searchResults/all?text=";
 
-  const encodedCity = encodeURIComponent(city.trim());
+  const hasQueryMark = viatorBase.includes("?");
+  const sep = hasQueryMark ? "&" : "?";
 
-  // Example full suffix (in .env):
-  // VIATOR_AFFILIATE_SUFFIX=&pid=P00240917&uid=U00642340&mcid=58086&currency=USD
-  // NOTE: suffix MUST start with "&", not "?".
-  const suffix = VIATOR_AFFILIATE_SUFFIX || "";
+  // Viator destination search (as the target)
+  const target = `${viatorBase}${encodeURIComponent(query)}${sep}${(VIATOR_AFFILIATE_SUFFIX || "").replace(/^\?/, "")}`;
 
-  const searchUrl = `${base}${encodedCity}${suffix}`;
-  const recommendedUrl = `${base}${encodedCity}${suffix}&sort=RECOMMENDED`;
+  // --- 2) If Travelpayouts tp.media params exist, wrap the target with tp.media redirect ---
+  if (TRAVELPAYOUTS_PARTNER_ID && TRAVELPAYOUTS_TOURS_PROGRAM_ID && TRAVELPAYOUTS_TOURS_TRS) {
+    const marker = encodeURIComponent(TRAVELPAYOUTS_PARTNER_ID);
+    const p = encodeURIComponent(TRAVELPAYOUTS_TOURS_PROGRAM_ID);
+    const trs = encodeURIComponent(TRAVELPAYOUTS_TOURS_TRS);
 
-  return { searchUrl, recommendedUrl };
+    // tp.media redirect link format: /r?marker=...&p=...&u=<encoded target>&trs=...
+    // Note: `u` must be URL-encoded.
+    const tp = `https://tp.media/r?marker=${marker}&p=${p}&u=${encodeURIComponent(target)}&trs=${trs}`;
+    return [
+      tp,
+      `${tp}&sort=RECOMMENDED`,
+    ];
+  }
+
+  // --- 3) Fallback: return the Viator affiliate links directly ---
+  return [
+    target,
+    `${target}&sort=RECOMMENDED`,
+  ];
 }
+
 
 // (Legacy helper – not used at runtime, kept for future re-use)
 function buildViatorLinksBlock(keyCities) {
@@ -353,12 +392,20 @@ function buildHotelLinks(destination) {
 
 // Flights links (e.g. Skyscanner/Kiwi)
 function buildFlightLinks(routeText) {
-  const encoded = encodeURIComponent(routeText.trim());
-  const base =
-    FLIGHTS_BASE_URL ||
-    "https://your-flights-affiliate-search-url.com/search?route=";
-  return [`${base}${encoded}`];
+  // Travelpayouts Flights (Aviasales) deep link.
+  // We keep this intentionally simple: we pass the user's query as a search intent.
+  // If you later want true origin/destination parsing + dates, we can add an Aviasales places autocomplete step.
+  const marker = TRAVELPAYOUTS_PARTNER_ID || "YOUR_TRAVELPAYOUTS_PARTNER_ID";
+  const q = (routeText || "").trim();
+  const encodedQ = encodeURIComponent(q);
+
+  // Aviasales affiliate links use the `marker` parameter for attribution.
+  // This link opens Aviasales with the search field prefilled; user can refine dates in UI.
+  const url = `https://www.aviasales.com/?marker=${encodeURIComponent(marker)}&search=${encodedQ}`;
+
+  return [url];
 }
+
 
 // ===== TEXT HELPERS =====
 
@@ -1584,3 +1631,4 @@ const port = PORT || 3000;
 app.listen(port, () => {
   console.log(`Hugu Travel Assistant running on port ${port}`);
 });
+c:\Users\USER\Downloads\divaHairSalon.jpg
